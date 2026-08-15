@@ -1,0 +1,29 @@
+{
+  "name": "loam_core",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "universal",
+  "category": "system",
+  "description": "Loam transport facade: one stable, bearer-agnostic API over the Logos delivery node (and later ble_mesh or lora). Apps depend on loam_core and call start/join/sendSealed/received while loam_core fans out to every bearer and dedups. See ADR 0015.",
+  "main": "loam_core_plugin",
+  "dependencies": [
+    "delivery_module"
+  ],
+  "nix": {
+    "packages": {
+      "build": [
+        "openssl"
+      ],
+      "runtime": [
+        "openssl"
+      ]
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}
