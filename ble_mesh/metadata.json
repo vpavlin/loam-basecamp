@@ -1,0 +1,15 @@
+{
+  "name": "ble_mesh",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "universal",
+  "category": "system",
+  "description": "Loam BLE offline-mesh bearer: flood-gossip over Bluetooth, wire-compatible with the Android Loam mesh and loam-transport bearer.ts (same frame format and frameId). Depended on by loam_core (and any app) as a second bearer beside delivery. Portable gossip today, Qt Bluetooth radio in Phase 3. See ADR 0015.",
+  "main": "ble_mesh_plugin",
+  "dependencies": [],
+  "nix": {
+    "packages": { "build": ["openssl"], "runtime": ["openssl"] },
+    "external_libraries": [],
+    "cmake": { "find_packages": [], "extra_sources": [], "extra_include_dirs": [], "extra_link_libraries": [] }
+  }
+}
