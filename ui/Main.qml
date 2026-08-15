@@ -32,6 +32,16 @@ Item {
     if (o && o.bearers !== undefined) root.metrics = o;
     root.statusText = callCore("status", []);
   }
+  // friendly name + a plain "when & why" per bearer — matches the mobile Loam app.
+  function bearerInfo(name) {
+    if (name === "delivery") return { label: "Logos network",
+      why: "The internet path — reaches anyone on the Logos network, anywhere there's a connection. It's how apps sync by default." };
+    if (name === "ble") return { label: "Bluetooth mesh",
+      why: "No internet needed — nearby devices sync directly, device-to-device, over Bluetooth. Auto-arms when the Logos path drops and heals back when it returns." };
+    if (name === "lora") return { label: "LoRa",
+      why: "Long-range, low-power radio — kilometres, off-grid. Apps don't change; it's just another pipe Loam fans writes across." };
+    return { label: name, why: "" };
+  }
   function setBearer(name, on) { callCore("setBearerEnabled", [name, on ? "1" : "0"]); Qt.callLater(root.refresh); }
   function setForceMesh(on)    { callCore("forceMesh", [on ? "1" : "0"]); Qt.callLater(root.refresh); }
   function setMode(m)          { root.mode = m; callCore("setNodeMode", [m]); }
@@ -73,30 +83,38 @@ Item {
         radius: Theme.spacing.radiusSmall
         color: Theme.palette.surface
         border.color: Theme.palette.border; border.width: 1
-        implicitHeight: brow.implicitHeight + Theme.spacing.medium * 2
-        RowLayout {
-          id: brow
-          anchors.fill: parent; anchors.margins: Theme.spacing.medium; spacing: Theme.spacing.medium
-          ColumnLayout {
-            spacing: 2
-            RowLayout {
-              spacing: Theme.spacing.small
-              LogosText { text: modelData.name; font.bold: true; color: Theme.palette.text }
-              LogosText {
-                text: modelData.ready ? "ready" : "down"
-                color: modelData.ready ? Theme.palette.success : Theme.palette.textTertiary
-                font.pixelSize: Theme.typography.sizeSmall
-              }
+        implicitHeight: bcol.implicitHeight + Theme.spacing.medium * 2
+        ColumnLayout {
+          id: bcol
+          anchors.fill: parent; anchors.margins: Theme.spacing.medium; spacing: Theme.spacing.small
+          RowLayout {
+            Layout.fillWidth: true; spacing: Theme.spacing.small
+            Rectangle {
+              width: 9; height: 9; radius: 4; Layout.alignment: Qt.AlignVCenter
+              color: modelData.ready && modelData.peers > 0 ? Theme.palette.success
+                   : modelData.ready ? Theme.palette.warning : Theme.palette.textTertiary
             }
+            LogosText { text: root.bearerInfo(modelData.name).label; font.bold: true; color: Theme.palette.text }
             LogosText {
-              text: "peers " + modelData.peers + "   rx " + modelData.rx + "   tx " + modelData.tx + "   prio " + modelData.priority
-              color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall
+              text: modelData.ready ? "ready" : "down"
+              color: modelData.ready ? Theme.palette.success : Theme.palette.textTertiary
+              font.pixelSize: Theme.typography.sizeSmall
+            }
+            Item { Layout.fillWidth: true }
+            LogosButton {
+              text: modelData.enabled ? "On" : "Off"
+              onClicked: root.setBearer(modelData.name, !modelData.enabled)
             }
           }
-          Item { Layout.fillWidth: true }
-          LogosButton {
-            text: modelData.enabled ? "On" : "Off"
-            onClicked: root.setBearer(modelData.name, !modelData.enabled)
+          LogosText {
+            text: "peers " + modelData.peers + "   rx " + modelData.rx + "   tx " + modelData.tx + "   prio " + modelData.priority
+            color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall
+          }
+          LogosText {
+            text: root.bearerInfo(modelData.name).why
+            visible: text.length > 0
+            color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall
+            wrapMode: Text.WordWrap; Layout.fillWidth: true
           }
         }
       }
