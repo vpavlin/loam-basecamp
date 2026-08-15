@@ -9,6 +9,10 @@
     delivery_module.url = "github:logos-co/logos-delivery-module/v0.2.0";
     logos-module-builder.url = "github:logos-co/logos-module-builder/0.2.6";
     delivery_module.inputs.logos-module-builder.follows = "logos-module-builder";
+    # ble_mesh is a sibling module in this monorepo (loam-basecamp/ble_mesh). loam_core fans
+    # each sealed write to it too and funnels its frames into the same dedup'd receive stream.
+    ble_mesh.url = "github:vpavlin/loam-basecamp?dir=ble_mesh";
+    ble_mesh.inputs.logos-module-builder.follows = "logos-module-builder";
   };
 
   # mkLogosModule (not mkLogosQmlModule): a headless CORE module — no QML view. The

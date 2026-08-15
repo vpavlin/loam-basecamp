@@ -1,5 +1,27 @@
 {
   "nodes": {
+    "ble_mesh": {
+      "inputs": {
+        "logos-module-builder": [
+          "logos-module-builder"
+        ]
+      },
+      "locked": {
+        "dir": "ble_mesh",
+        "lastModified": 1786809912,
+        "narHash": "sha256-8AHbWbeu9YzARhucHelBfaXjF8mwhOplRgBY8nYPo7k=",
+        "owner": "vpavlin",
+        "repo": "loam-basecamp",
+        "rev": "19002e5a56f67c512984e49e90ec2bb7b5bc26c8",
+        "type": "github"
+      },
+      "original": {
+        "dir": "ble_mesh",
+        "owner": "vpavlin",
+        "repo": "loam-basecamp",
+        "type": "github"
+      }
+    },
     "default-container": {
       "inputs": {
         "logos-container": "logos-container",
@@ -48238,6 +48260,7 @@
     },
     "root": {
       "inputs": {
+        "ble_mesh": "ble_mesh",
         "delivery_module": "delivery_module",
         "logos-module-builder": "logos-module-builder"
       }

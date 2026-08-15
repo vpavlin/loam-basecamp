@@ -17,6 +17,7 @@ logos_module(
         src/loam_core_impl.cpp
         src/multibearer.hpp
         src/delivery_bearer.hpp
+        src/ble_module_bearer.hpp
     INCLUDE_DIRS src
     FIND_PACKAGES OpenSSL
     LINK_LIBRARIES OpenSSL::Crypto

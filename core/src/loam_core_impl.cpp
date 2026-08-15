@@ -2,8 +2,9 @@
 // modules().delivery_module.* (where the generated type is complete), funnels receives
 // through the MultiBearer dedup into the `received` event, and polls delivery metrics.
 #include "loam_core_impl.h"
-#include "logos_sdk.h"         // umbrella: complete LogosModules + LogosMap (nlohmann::json)
-#include "delivery_bearer.hpp" // DeliveryBearer<LogosMap> (needs LogosMap → after logos_sdk.h)
+#include "logos_sdk.h"          // umbrella: complete LogosModules + LogosMap (nlohmann::json)
+#include "delivery_bearer.hpp"  // DeliveryBearer<LogosMap> (needs LogosMap → after logos_sdk.h)
+#include "ble_module_bearer.hpp"// BleModuleBearer — fronts the ble_mesh module (Ops bound below)
 #include "logos_result.h"      // StdLogosResult {success, value, error}
 #include <QTimer>
 #include <sstream>
@@ -87,6 +88,23 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     db->onReady = [this] { setStatus("Connected"); };
     m_delivery = db.get();
     m_bearers.add(std::move(db));
+
+    // Second bearer: the ble_mesh module (flood-gossip over Bluetooth). The MultiBearer fans each
+    // write to it too and dedups its frames against the Waku copy by frameId. 0 peers until the
+    // ble_mesh Qt Bluetooth radio (Phase 3), so it's inert but present in metrics/control today.
+    loam::BleModuleBearer::Ops bops;
+    bops.start = [this] { modules().ble_mesh.startAsync([](std::string) {}); };
+    bops.flood = [this](const std::string& topic, const std::string& payloadB64) {
+      modules().ble_mesh.floodAsync(topic, payloadB64, [](std::string) {});
+    };
+    bops.onFrame = [this](loam::BleModuleBearer::FrameRecvCb cb) {
+      modules().ble_mesh.onFrameReceived(
+        [cb](const std::string& topic, const std::string& sender, const std::string& payloadB64, int64_t ts) {
+          cb(topic, sender, payloadB64, ts);
+        });
+    };
+    m_bearers.add(std::make_unique<loam::BleModuleBearer>(bops));
+
     m_built = true;
 }
 

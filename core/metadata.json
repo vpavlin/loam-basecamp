@@ -7,7 +7,8 @@
   "description": "Loam transport facade: one stable, bearer-agnostic API over the Logos delivery node (and later ble_mesh or lora). Apps depend on loam_core and call start/join/sendSealed/received while loam_core fans out to every bearer and dedups. See ADR 0015.",
   "main": "loam_core_plugin",
   "dependencies": [
-    "delivery_module"
+    "delivery_module",
+    "ble_mesh"
   ],
   "nix": {
     "packages": {
