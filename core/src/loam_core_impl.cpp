@@ -66,20 +66,19 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
 
     DB::Config cfg;
     cfg.deviceId = m_senderId;
-    cfg.mode = m_mode;
+    // Parse the app's cfg. loam-only keys (useChannels, hubMode) are pulled OUT into Config;
+    // everything else is the delivery node config (WakuNodeConf) forwarded verbatim to
+    // createNode — so the app's shard/cluster/entryNodes/preset/mode all pass through.
     LogosMap j = cfgJson.empty() ? LogosMap::object() : LogosMap::parse(cfgJson, nullptr, false);
-    if (j.is_object()) {
-        if (j.contains("preset")   && j["preset"].is_string())   cfg.preset   = j["preset"].get<std::string>();
-        if (j.contains("mode")     && j["mode"].is_string())     cfg.mode     = j["mode"].get<std::string>();
-        if (j.contains("logLevel") && j["logLevel"].is_string()) cfg.logLevel = j["logLevel"].get<std::string>();
-        if (j.contains("hubMode")  && j["hubMode"].is_boolean()) cfg.hubMode  = j["hubMode"].get<bool>();
-        // A consuming app can pick its delivery transport so loam_core is a drop-in for its
-        // CURRENT wire: useChannels=true → SDS Reliable Channels (mobile parity, default);
-        // false → raw relay (what shipping kym defaults to). Prevents a silent mode flip.
-        if (j.contains("useChannels") && j["useChannels"].is_boolean()) cfg.useChannels = j["useChannels"].get<bool>();
-        if (j.contains("entryNodes") && j["entryNodes"].is_array())
-            for (const auto& e : j["entryNodes"]) if (e.is_string()) cfg.entryNodes.push_back(e.get<std::string>());
-    }
+    if (!j.is_object()) j = LogosMap::object();
+    if (j.contains("hubMode")     && j["hubMode"].is_boolean())     cfg.hubMode     = j["hubMode"].get<bool>();
+    // useChannels: true → SDS Reliable Channels (mobile parity, default); false → raw relay
+    // (shipping kym's current wire). Keeps loam_core a drop-in — no silent mode flip.
+    if (j.contains("useChannels") && j["useChannels"].is_boolean()) cfg.useChannels = j["useChannels"].get<bool>();
+    j.erase("hubMode"); j.erase("useChannels");                    // not delivery-node keys
+    if (!j.contains("mode"))   j["mode"]   = m_mode;               // default node mode
+    if (!j.contains("preset")) j["preset"] = "logos.test";        // cluster-2 (ADR 0008)
+    cfg.nodeCfgJson = j.dump();
 
     auto db = std::make_unique<DB>(ops, cfg);
     m_delivery = db.get();

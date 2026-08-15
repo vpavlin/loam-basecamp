@@ -34,13 +34,13 @@ public:
         std::function<void(RecvCb)> onChannelMessage;  // SDS channel receive
     };
     struct Config {
-        std::string logLevel = "INFO";
-        std::string preset = "logos.test";   // cluster-2; logos.dev is cluster-3 and fails to mesh (ADR 0008)
-        std::string mode = "Core";           // desktop relays the shard by default
-        std::vector<std::string> entryNodes; // empty on a GUI host; pin for a headless node
+        std::string deviceId;                // SDS senderId
         bool useChannels = true;             // SDS Reliable Channels (interops with mobile)
         bool hubMode = false;                // headless: delay createNode so handler IPC lands first
-        std::string deviceId;                // SDS senderId
+        // The FULL delivery createNode config (WakuNodeConf) as JSON, forwarded verbatim to
+        // delivery.createNode — so the consuming app's shard/cluster/entryNodes/preset/mode all
+        // pass through unchanged. loam_core fills defaults (mode, preset) before setting it.
+        std::string nodeCfgJson;
     };
     using Delay = std::function<void(int ms, std::function<void()>)>;
 
@@ -77,11 +77,9 @@ public:
         if (m_ops.onMessage)        m_ops.onMessage(handle);
         if (m_ops.onChannelMessage) m_ops.onChannelMessage(handle);
 
-        LogosMap cfg = LogosMap::object();
-        cfg["logLevel"] = m_cfg.logLevel; cfg["mode"] = m_cfg.mode; cfg["preset"] = m_cfg.preset;
-        if (!m_cfg.entryNodes.empty()) { cfg["relay"] = true;
-            LogosMap arr = LogosMap::array(); for (auto &e : m_cfg.entryNodes) arr.push_back(e); cfg["entryNodes"] = arr; }
-        const std::string cfgStr = cfg.dump();
+        // The node config is forwarded verbatim (loam_core already merged defaults).
+        const std::string cfgStr = m_cfg.nodeCfgJson.empty()
+            ? std::string("{\"mode\":\"Core\",\"preset\":\"logos.test\"}") : m_cfg.nodeCfgJson;
 
         auto startNode = [this, cfgStr]() {
             if (!m_ops.createNode) { m_starting = false; return; }
