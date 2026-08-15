@@ -81,6 +81,10 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     cfg.nodeCfgJson = j.dump();
 
     auto db = std::make_unique<DB>(ops, cfg);
+    // Turn the bearer's readiness into a statusChanged("Connected") event: start() returns
+    // early (async node bringup), so apps learn the node is up by subscribing to statusChanged,
+    // not from the start() callback.
+    db->onReady = [this] { setStatus("Connected"); };
     m_delivery = db.get();
     m_bearers.add(std::move(db));
     m_built = true;

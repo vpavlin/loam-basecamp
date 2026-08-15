@@ -49,7 +49,10 @@ public:
 
     const std::string &name() const override { static const std::string n = "delivery"; return n; }
     bool ready() const override { return m_nodeReady; }
-    void setPeers(long p) { m_peers = p; }
+    void setPeers(long p) override { m_peers = p; }
+    // Fired once when the node finishes createNode+start (the readiness signal loam_core
+    // turns into a statusChanged("Connected") event for apps — start() itself returns early).
+    std::function<void()> onReady;
 
     void start() override {
         if (m_nodeReady || m_starting) return;
@@ -91,6 +94,7 @@ public:
                     m_nodeReady = true; m_starting = false;
                     for (const auto &t : m_pendingTopics) doJoin(t);   // (re)join topics requested before ready
                     m_pendingTopics.clear();
+                    if (onReady) onReady();                            // → loam_core emits "Connected"
                 });
             });
         };
