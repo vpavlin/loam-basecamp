@@ -73,6 +73,10 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
         if (j.contains("mode")     && j["mode"].is_string())     cfg.mode     = j["mode"].get<std::string>();
         if (j.contains("logLevel") && j["logLevel"].is_string()) cfg.logLevel = j["logLevel"].get<std::string>();
         if (j.contains("hubMode")  && j["hubMode"].is_boolean()) cfg.hubMode  = j["hubMode"].get<bool>();
+        // A consuming app can pick its delivery transport so loam_core is a drop-in for its
+        // CURRENT wire: useChannels=true → SDS Reliable Channels (mobile parity, default);
+        // false → raw relay (what shipping kym defaults to). Prevents a silent mode flip.
+        if (j.contains("useChannels") && j["useChannels"].is_boolean()) cfg.useChannels = j["useChannels"].get<bool>();
         if (j.contains("entryNodes") && j["entryNodes"].is_array())
             for (const auto& e : j["entryNodes"]) if (e.is_string()) cfg.entryNodes.push_back(e.get<std::string>());
     }
