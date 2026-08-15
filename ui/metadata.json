@@ -1,0 +1,9 @@
+{
+  "name": "loam_ui",
+  "version": "0.1.0",
+  "type": "ui_qml",
+  "view": "Main.qml",
+  "icon": "icon.png",
+  "description": "Loam control panel: live per-bearer metrics and controls (enable, priority, force-mesh, node mode) over loam_core.",
+  "dependencies": ["loam_core"]
+}

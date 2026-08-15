@@ -10,7 +10,7 @@ loam-transport `docs/adr/0015-…`).
 | dir | module | what it is |
 |-----|--------|------------|
 | [`core/`](core/) | **`loam_core`** | The transport **facade**: one stable, bearer-agnostic API (`start`/`join`/`sendSealed`/`received`) + control/metrics (`setBearerEnabled`/`setBearerPriority`/`forceMesh`/`setNodeMode`/`metricsJson`) over a MultiBearer with `frameId` dedup. Depends on `delivery_module` today; `ble_mesh` / `lora` slot in behind it with zero app edits. |
-| `ui/` | **`loam_ui`** *(planned, Phase 2)* | A pure-QML metrics + control panel driving `loam_core` via `logos.callModule` — the desktop counterpart of the Android Loam app's panel / `LoamDebug`. |
+| [`ui/`](ui/) | **`loam_ui`** | A pure-QML metrics + control panel driving `loam_core` via `logos.callModule` — live per-bearer stats + controls (enable/priority, force-mesh, node mode). Builds to a Basecamp `.lgx`; the desktop counterpart of the Android Loam panel / `LoamDebug`. |
 | [`ble_mesh/`](ble_mesh/) | **`ble_mesh`** | The BLE offline-mesh bearer as its own reusable module. **Portable flood-gossip + frame codec done & tested** (`frameId` parity-checked against `bearer.ts`, 28 checks), builds/loads as a module with a stub radio; the Qt Bluetooth radio is Phase 3 (needs hardware). |
 
 ## Architecture (why a facade)
