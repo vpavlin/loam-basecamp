@@ -8,8 +8,22 @@
   "main": "ble_mesh_plugin",
   "dependencies": [],
   "nix": {
-    "packages": { "build": ["openssl"], "runtime": ["openssl"] },
+    "packages": {
+      "build": [
+        "openssl",
+        "qt6.qtconnectivity"
+      ],
+      "runtime": [
+        "openssl",
+        "qt6.qtconnectivity"
+      ]
+    },
     "external_libraries": [],
-    "cmake": { "find_packages": [], "extra_sources": [], "extra_include_dirs": [], "extra_link_libraries": [] }
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
   }
 }
