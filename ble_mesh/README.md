@@ -22,9 +22,14 @@ ordering/reliability of its own — convergence is loam-sync's job.
   `start` / `stop` / `flood(topic, payloadB64)` / `reachablePeers` / `status` and a
   `frameReceived(topic, senderId, payloadB64, ts)` event. `dependencies: []` — it depends on
   nothing. Runs today with a **no-op `StubRadio`** (0 peers) so it loads without a BLE device.
-- **Qt Bluetooth radio — Phase 3 (needs hardware).** Swap `StubRadio` for a `QtBleRadio`
-  implementing `MeshRadio` with `QLowEnergyController` (peripheral **and** central). One-line swap
-  in `onContextReady()`; the gossip layer is unchanged.
+- **Qt Bluetooth radio — WRITTEN & COMPILES (Phase 3, hardware-unverified).** `QtBleRadio`
+  (`src/mesh_radio_qt.{hpp,cpp}`) implements `MeshRadio` with `QLowEnergyController` peripheral
+  (advertise + GATT server) **and** central (scan-filter + dial), the ANNOUNCE/FRAG protocol,
+  per-`(addr,msgId)` reassembly, and node-id identity — matching the contract below. It **builds
+  against Qt 6.11** (`qt6.qtconnectivity` in the nix packages; CMake finds `Qt6::Bluetooth` and
+  defines `LOAM_HAS_QTBLUETOOTH`, else falls back to `StubRadio` so the build stays green). It is
+  **NOT hardware-verified** — desktop BlueZ peripheral/advertising is the risk; run it
+  laptop↔laptop, then laptop↔phone, and expect on-device iteration.
 
 ## Radio wire-compat contract (Phase 3 must match the Android Loam mesh)
 
