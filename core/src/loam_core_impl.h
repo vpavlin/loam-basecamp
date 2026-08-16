@@ -2,6 +2,7 @@
 #include <string>
 #include <memory>
 #include <mutex>
+#include <deque>
 
 class QTimer;
 #include "logos_module_context.h"   // LogosModuleContext base + logos_events: + modules()
@@ -48,6 +49,10 @@ public:
     // --- metrics API (loam_ui polls these) ---
     std::string metricsJson();
     std::string status();
+    // Pull-based receive log: drains + returns recently received frames as a JSON array of
+    // {topic, sender, payloadB64, ts}. Complements the `received` EVENT for headless collectors
+    // (the hub can `call` this even where it can't stream the event) — e.g. loam-telemetry capture.
+    std::string recentReceived();
 
 protected:
     void onContextReady() override;
@@ -73,4 +78,5 @@ private:
     std::string m_status = "Starting...";
     std::recursive_mutex m_mtx;
     QTimer* m_metricsTimer = nullptr;
+    std::deque<std::string> m_rxLog;   // recent received frames (JSON strings); drained by recentReceived()
 };

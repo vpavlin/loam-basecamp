@@ -21,7 +21,14 @@ void LoamCoreImpl::onContextReady() {
     // Receive path: MultiBearer dedups, then we emit `received` (b64 for IPC safety).
     m_bearers.onReceived = [this](const std::string& topic, const std::string& sender,
                                   const std::string& sealed, int64_t ts) {
-        received(topic, sender, loam::b64::encode(sealed), ts);
+        const std::string b64 = loam::b64::encode(sealed);
+        received(topic, sender, b64, ts);          // the QRO event (for GUI/app cores)
+        // ALSO tee into a drainable ring, so a headless collector can pull frames via
+        // recentReceived() even where the event stream isn't observable (loam-telemetry).
+        std::lock_guard<std::recursive_mutex> lk(m_mtx);
+        LogosMap e; e["topic"] = topic; e["sender"] = sender; e["payloadB64"] = b64; e["ts"] = ts;
+        m_rxLog.push_back(e.dump());
+        while (m_rxLog.size() > 256) m_rxLog.pop_front();
     };
     // Peer-count poll on this module's thread (getNodeInfo is async; never blocks).
     m_metricsTimer = new QTimer();
@@ -182,6 +189,16 @@ std::string LoamCoreImpl::metricsJson() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!m_built) return "{\"bearers\":[],\"peers\":-1,\"connected\":false}";
     return m_bearers.metricsJson();
+}
+
+// Drain the receive ring: returns [{topic,sender,payloadB64,ts}, …] and clears it. A headless
+// collector polls this (a plain `call`, unlike the `received` event) — e.g. loam-telemetry capture.
+std::string LoamCoreImpl::recentReceived() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    LogosMap arr = LogosMap::array();
+    for (const auto& s : m_rxLog) { try { arr.push_back(LogosMap::parse(s)); } catch (...) {} }
+    m_rxLog.clear();
+    return arr.dump();
 }
 
 std::string LoamCoreImpl::status() {

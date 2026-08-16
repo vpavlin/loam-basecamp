@@ -72,8 +72,12 @@ public:
             std::string enc = toWire(payload);
             if (enc.empty() && payload.is_object() && payload.contains("payload")) enc = toWire(payload["payload"]);
             if (enc.empty()) return;
-            ++m_rx;
             const std::string sealed = b64::decode(enc);   // one decode; the app peels the last layer
+            // Raw relay (onMessage) also fires for the shard's SDS-framed relay traffic — a string that
+            // isn't our base64 payload, so b64::decode yields nothing. Drop it: forwarding empty frames
+            // both delivers garbage AND floods `received` (a QRO event storm that wedges the headless hub).
+            if (sealed.empty()) return;
+            ++m_rx;
             if (onFrame) onFrame(topic, sender, sealed, ts);
         };
         // Register receive handlers BEFORE createNode (the position a GUI host receives with).
