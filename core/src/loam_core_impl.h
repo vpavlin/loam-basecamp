@@ -5,6 +5,7 @@
 #include <deque>
 
 class QTimer;
+namespace loamid { class IdentityStore; }   // loam ADR 0004 identity service — defined in loam_identity.hpp (.cpp only)
 #include "logos_module_context.h"   // LogosModuleContext base + logos_events: + modules()
 #include "multibearer.hpp"          // IBearer + MultiBearer (std::string only, no LogosMap)
 // NOTE: the generated modules() type + LogosMap live in the umbrella "logos_sdk.h", which
@@ -46,6 +47,20 @@ public:
     std::string forceMesh(std::string on);
     std::string setNodeMode(std::string mode);
 
+    // --- identity API (loam ADR 0004) — apps sign through loam; the identity UI stays in each app.
+    // Keys never leave loam. Returns are JSON strings (a meta = {id,kind,label,address,pubHex}).
+    std::string listIdentities();
+    std::string addSoftIdentity(std::string label);
+    std::string renameSoftIdentity(std::string id, std::string label);
+    std::string removeSoftIdentity(std::string id);
+    std::string getDefaultIdentityId();
+    std::string setDefaultIdentityId(std::string id);
+    std::string bindingFor(std::string containerId);
+    std::string bindContainer(std::string containerId, std::string identityId);
+    std::string identityForContainer(std::string containerId);
+    // Sign a 32-byte hex digest with the container's bound identity → {sig,pub,address} | {error}.
+    std::string signDigest(std::string containerId, std::string digestHex);
+
     // --- metrics API (loam_ui polls these) ---
     std::string metricsJson();
     std::string status();
@@ -67,11 +82,13 @@ logos_events:
 
 private:
     void ensureBearers(const std::string& cfgJson);   // build the delivery bearer (once)
+    loamid::IdentityStore* idStore();                 // lazy-init the identity service on first use
     void setStatus(const std::string& s);
     void refreshMetrics();         // async getNodeInfo("Metrics") → peer count → metricsChanged
 
     loam::MultiBearer m_bearers;
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers
+    loamid::IdentityStore* m_idStore = nullptr; // loam ADR 0004 identity service (lazy-init; new/delete in .cpp)
     bool m_built = false, m_started = false, m_forceMesh = false;
     std::string m_senderId = "loam-core";
     std::string m_mode = "Core";     // delivery bearer node mode (Core|Edge)

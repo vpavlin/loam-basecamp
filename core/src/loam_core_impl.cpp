@@ -8,11 +8,13 @@
 #include "logos_result.h"      // StdLogosResult {success, value, error}
 #include <QTimer>
 #include <sstream>
+#include "loam_identity.hpp"    // loam ADR 0004 identity service (crypto + key/binding store)
 
 using DB = loam::DeliveryBearer<LogosMap>;
 
 LoamCoreImpl::~LoamCoreImpl() {
     if (m_metricsTimer) { m_metricsTimer->stop(); m_metricsTimer->deleteLater(); m_metricsTimer = nullptr; }
+    delete m_idStore; m_idStore = nullptr;
 }
 
 void LoamCoreImpl::setStatus(const std::string& s) { m_status = s; statusChanged(s); }
@@ -225,3 +227,22 @@ void LoamCoreImpl::refreshMetrics() {
         metricsChanged(m_bearers.metricsJson());
     });
 }
+
+// ── identity service (loam ADR 0004) ─────────────────────────────────────────
+// Apps sign through loam; keys never leave. All JSON in/out (universal authoring). The identity UI
+// lives in each app's view and drives these over module IPC.
+loamid::IdentityStore* LoamCoreImpl::idStore() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_idStore) { m_idStore = new loamid::IdentityStore(); m_idStore->load(); }
+    return m_idStore;
+}
+std::string LoamCoreImpl::listIdentities() { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->listIdentities().dump(); }
+std::string LoamCoreImpl::addSoftIdentity(std::string label) { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->addSoftIdentity(label).dump(); }
+std::string LoamCoreImpl::renameSoftIdentity(std::string id, std::string label) { std::lock_guard<std::recursive_mutex> lk(m_mtx); idStore()->renameSoftIdentity(id, label); return "{\"ok\":true}"; }
+std::string LoamCoreImpl::removeSoftIdentity(std::string id) { std::lock_guard<std::recursive_mutex> lk(m_mtx); idStore()->removeSoftIdentity(id); return "{\"ok\":true}"; }
+std::string LoamCoreImpl::getDefaultIdentityId() { std::lock_guard<std::recursive_mutex> lk(m_mtx); return nlohmann::json(idStore()->getDefaultIdentityId()).dump(); }
+std::string LoamCoreImpl::setDefaultIdentityId(std::string id) { std::lock_guard<std::recursive_mutex> lk(m_mtx); idStore()->setDefaultIdentityId(id); return "{\"ok\":true}"; }
+std::string LoamCoreImpl::bindingFor(std::string containerId) { std::lock_guard<std::recursive_mutex> lk(m_mtx); std::string b = idStore()->bindingFor(containerId); return b.empty() ? std::string("null") : nlohmann::json(b).dump(); }
+std::string LoamCoreImpl::bindContainer(std::string containerId, std::string identityId) { std::lock_guard<std::recursive_mutex> lk(m_mtx); idStore()->bindContainer(containerId, identityId); return "{\"ok\":true}"; }
+std::string LoamCoreImpl::identityForContainer(std::string containerId) { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->identityForContainer(containerId).dump(); }
+std::string LoamCoreImpl::signDigest(std::string containerId, std::string digestHex) { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->signDigest(containerId, digestHex).dump(); }
