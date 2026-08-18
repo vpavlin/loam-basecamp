@@ -13,6 +13,13 @@
     # each sealed write to it too and funnels its frames into the same dedup'd receive stream.
     ble_mesh.url = "github:vpavlin/loam-basecamp?dir=ble_mesh";
     ble_mesh.inputs.logos-module-builder.follows = "logos-module-builder";
+    # keycard: Alisher's native smartcard module (PC/SC via keycard-qt). loam_core's
+    # identity service delegates signDigest for a keycard-kind identity to it. Declaring
+    # it makes keycard a HARD dependency of loam_core (Basecamp has no optional deps) —
+    # so every app on loam_core requires the keycard module present; it loads idle
+    # without a reader. See ADR 0004 (loam) / scala ADR 0016.
+    keycard.url = "github:xAlisher/keycard-basecamp";
+    keycard.inputs.logos-module-builder.follows = "logos-module-builder";
   };
 
   # mkLogosModule (not mkLogosQmlModule): a headless CORE module — no QML view. The

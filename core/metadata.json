@@ -1,6 +1,6 @@
 {
   "name": "loam_core",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "core",
   "interface": "universal",
   "category": "system",
@@ -8,7 +8,8 @@
   "main": "loam_core_plugin",
   "dependencies": [
     "delivery_module",
-    "ble_mesh"
+    "ble_mesh",
+    "keycard"
   ],
   "nix": {
     "packages": {

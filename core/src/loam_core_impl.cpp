@@ -246,3 +246,101 @@ std::string LoamCoreImpl::bindingFor(std::string containerId) { std::lock_guard<
 std::string LoamCoreImpl::bindContainer(std::string containerId, std::string identityId) { std::lock_guard<std::recursive_mutex> lk(m_mtx); idStore()->bindContainer(containerId, identityId); return "{\"ok\":true}"; }
 std::string LoamCoreImpl::identityForContainer(std::string containerId) { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->identityForContainer(containerId).dump(); }
 std::string LoamCoreImpl::signDigest(std::string containerId, std::string digestHex) { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->signDigest(containerId, digestHex).dump(); }
+std::string LoamCoreImpl::removeKeycardIdentity(std::string id) { std::lock_guard<std::recursive_mutex> lk(m_mtx); idStore()->removeKeycardIdentity(id); return "{\"ok\":true}"; }
+
+// ── keycard identity delegation (scala ADR 0016) ──────────────────────────────
+// A keycard identity's private key lives on the card; loam delegates signing to Alisher's keycard
+// module (a declared dependency): requestSign at the domain's 1582' non-exportable path (== mobile's
+// domainToSignPath) → keycard-ui shows the approval panel (PIN + tap) → checkSignStatus returns a
+// 65-byte R‖S‖V once (one-read-and-drop). We NEVER block: requestSignAsync + a self-rescheduling
+// checkSignStatusAsync poll, result delivered on the keycardSignResult event (like refreshMetrics).
+struct KcPending {
+    std::string mode;      // "sign" | "enroll"
+    std::string ref;       // caller-chosen correlation id (echoed on keycardSignResult)
+    std::string domain;    // Keycard sign domain (e.g. "scala")
+    std::string digestHex; // 32-byte hex payload actually signed
+    std::string pubHex;    // (sign) expected card pubkey — guards against a wrong card
+    std::string address;   // (sign) expected card address
+    std::string label;     // (enroll) label for the new identity
+    std::vector<unsigned char> enrollDigest;  // (enroll) raw digest, for pubkey recovery
+    std::string signId;    // filled once requestSign returns
+    int polls = 0;
+};
+
+void LoamCoreImpl::startKeycardSign(std::shared_ptr<KcPending> p) {
+    nlohmann::json args{{"domain", p->domain}, {"payloadHash", p->digestHex},
+                        {"caller", "loam"}, {"scheme", "ecdsa"}};
+    modules().keycard.requestSignAsync(args.dump(), [this, p](std::string res) {
+        nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
+        if (!r.is_object() || !r.contains("signId")) {
+            keycardSignResult(p->ref, nlohmann::json{{"error", "keycard requestSign failed"}, {"detail", res}}.dump());
+            return;
+        }
+        p->signId = r["signId"].get<std::string>();
+        pollKeycard(p);
+    });
+}
+
+void LoamCoreImpl::pollKeycard(std::shared_ptr<KcPending> p) {
+    modules().keycard.checkSignStatusAsync(p->signId, [this, p](std::string res) {
+        nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
+        const std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
+        if (status == "complete" && r.contains("signature")) { finalizeKeycard(p, r["signature"].get<std::string>()); return; }
+        if (status == "failed" || (r.is_object() && r.contains("error"))) {
+            // {error:"Sign request not found"} (expired) or an on-card failure — stop.
+            keycardSignResult(p->ref, nlohmann::json{{"error", r.value("error", status.empty() ? std::string("keycard sign failed") : status)}}.dump());
+            return;
+        }
+        // still pending (incl. wrong-PIN retries, which stay pending) — poll again, with a cap.
+        if (++p->polls > 180) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard sign timeout"}}.dump()); return; }
+        QTimer::singleShot(1000, [this, p] { pollKeycard(p); });
+    });
+}
+
+void LoamCoreImpl::finalizeKeycard(std::shared_ptr<KcPending> p, const std::string& sigHex) {
+    std::vector<unsigned char> sig = loamid::fromHexB(sigHex);
+    std::vector<unsigned char> compact = loamid::compact64LowS(sig);   // 65B R‖S‖V → 64B low-S r‖s
+    if (compact.size() != 64) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard bad signature"}}.dump()); return; }
+
+    if (p->mode == "enroll") {
+        loamid::SignId rec = loamid::ecdsaRecover(p->enrollDigest, sig);   // pubkey from R‖S‖V
+        if (!rec.ok) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard pubkey recovery failed"}}.dump()); return; }
+        nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, rec.address, rec.pubHex); }
+        keycardSignResult(p->ref, meta.dump());
+        return;
+    }
+    // sign: guard that the signing card IS the enrolled identity (recover pub, compare), then return.
+    if (sig.size() == 65 && !p->pubHex.empty()) {
+        loamid::SignId rec = loamid::ecdsaRecover(loamid::fromHexB(p->digestHex), sig);
+        if (rec.ok && rec.pubHex != p->pubHex) {
+            keycardSignResult(p->ref, nlohmann::json{{"error", "wrong card — signed by " + rec.address + ", expected " + p->address}}.dump());
+            return;
+        }
+    }
+    keycardSignResult(p->ref, nlohmann::json{{"sig", loamid::toHexS(compact.data(), 64)}, {"pub", p->pubHex}, {"address", p->address}}.dump());
+}
+
+std::string LoamCoreImpl::enrollKeycard(std::string label, std::string domain, std::string ref) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (domain.empty()) return "{\"error\":\"domain required\"}";
+    auto p = std::make_shared<KcPending>();
+    p->mode = "enroll"; p->ref = ref; p->domain = domain; p->label = label.empty() ? domain : label;
+    p->enrollDigest = loamid::sha256b(loamid::strBytes("loam-keycard-enroll-v1:" + domain));
+    p->digestHex = loamid::toHexS(p->enrollDigest.data(), 32);
+    startKeycardSign(p);
+    return nlohmann::json{{"status", "pending"}, {"ref", ref}}.dump();
+}
+
+std::string LoamCoreImpl::keycardSign(std::string containerId, std::string digestHex, std::string ref) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    nlohmann::json meta = idStore()->identityForContainer(containerId);
+    if (!meta.is_object() || meta.value("kind", std::string()) != "keycard")
+        return "{\"error\":\"container is not bound to a keycard identity\"}";
+    if (digestHex.size() != 64) return "{\"error\":\"digest must be 32 bytes hex\"}";
+    auto p = std::make_shared<KcPending>();
+    p->mode = "sign"; p->ref = ref; p->domain = meta.value("domain", std::string());
+    p->digestHex = digestHex; p->pubHex = meta.value("pubHex", std::string());
+    p->address = meta.value("address", std::string());
+    startKeycardSign(p);
+    return nlohmann::json{{"status", "pending"}, {"ref", ref}}.dump();
+}

@@ -89,6 +89,63 @@ inline Bytes ecdsaSignLowS(const Bytes& priv, const Bytes& digest32) {
     return out;
 }
 
+// Recover the compressed pubkey (+address) from a 65-byte recoverable ECDSA sig (R‖S‖V) over a
+// 32-byte digest — Q = r⁻¹(s·R − e·G). Used at KEYCARD ENROL: loam requestSign's an enrol digest,
+// the card returns R‖S‖V, and we recover the card's public address WITHOUT the private key ever
+// leaving the card. V tolerates the Ethereum 27/28 offset. Mirrors scala's address derivation.
+inline SignId ecdsaRecover(const Bytes& digest32, const Bytes& sig65) {
+    SignId id;
+    if (digest32.size() != 32 || sig65.size() != 65) return id;
+    int v = sig65[64]; if (v >= 27) v -= 27; if (v < 0 || v > 3) return id;
+    EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1);
+    BN_CTX* ctx = BN_CTX_new();
+    BIGNUM* r = BN_bin2bn(sig65.data(), 32, nullptr);
+    BIGNUM* s = BN_bin2bn(sig65.data() + 32, 32, nullptr);
+    BIGNUM* e = BN_bin2bn(digest32.data(), 32, nullptr);
+    BIGNUM* order = BN_new(); EC_GROUP_get_order(grp, order, ctx);
+    BIGNUM* x = BN_new(); BN_copy(x, r);
+    if (v & 2) BN_add(x, x, order);                 // x = r (+ n when recovery id ≥ 2)
+    EC_POINT* R = EC_POINT_new(grp);
+    Bytes enc(33); enc[0] = (unsigned char)(0x02 | (v & 1)); BN_bn2binpad(x, enc.data() + 1, 32);
+    if (r && s && e && EC_POINT_oct2point(grp, R, enc.data(), 33, ctx) == 1) {
+        BIGNUM* rinv = BN_mod_inverse(nullptr, r, order, ctx);
+        BIGNUM* sr = BN_new(); BN_mod_mul(sr, s, rinv, order, ctx);          // s/r
+        BIGNUM* er = BN_new(); BN_mod_mul(er, e, rinv, order, ctx);          // e/r
+        BIGNUM* erNeg = BN_new(); BN_mod_sub(erNeg, order, er, order, ctx);  // −e/r
+        EC_POINT* Q = EC_POINT_new(grp);
+        if (EC_POINT_mul(grp, Q, erNeg, R, sr, ctx) == 1) {                  // Q = (−e/r)·G + (s/r)·R
+            Bytes pubc(33);
+            if (EC_POINT_point2oct(grp, Q, POINT_CONVERSION_COMPRESSED, pubc.data(), 33, ctx) == 33) {
+                id.pub = pubc; id.pubHex = toHexS(pubc.data(), 33);
+                Bytes h = sha256b(pubc);
+                id.address = "0x" + toHexS(h.data(), 32).substr(24, 40);
+                id.ok = true;
+            }
+        }
+        EC_POINT_free(Q); if (rinv) BN_free(rinv); BN_free(sr); BN_free(er); BN_free(erNeg);
+    }
+    EC_POINT_free(R); if (r) BN_free(r); if (s) BN_free(s); if (e) BN_free(e);
+    BN_free(order); BN_free(x); BN_CTX_free(ctx); EC_GROUP_free(grp);
+    return id;
+}
+
+// Normalise a card signature (65B R‖S‖V from Keycard's signWithPath, or a bare 64B r‖s) to the
+// 64-byte LOW-S r‖s that scala/loam verify expects. Dropping V is safe — the event stores e.pub,
+// so verification never needs recovery. Flipping s→n−s stays a valid signature (canonical low-S).
+inline Bytes compact64LowS(const Bytes& sig) {
+    if (sig.size() < 64) return {};
+    EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1); BN_CTX* ctx = BN_CTX_new();
+    BIGNUM* order = BN_new(); EC_GROUP_get_order(grp, order, ctx);
+    BIGNUM* half = BN_new(); BN_rshift1(half, order);
+    BIGNUM* sb = BN_bin2bn(sig.data() + 32, 32, nullptr);
+    if (BN_cmp(sb, half) > 0) BN_sub(sb, order, sb);        // low-S
+    Bytes out(64, 0);
+    std::copy(sig.begin(), sig.begin() + 32, out.begin());  // r
+    BN_bn2binpad(sb, out.data() + 32, 32);                  // s (low)
+    BN_free(sb); BN_free(half); BN_free(order); BN_CTX_free(ctx); EC_GROUP_free(grp);
+    return out;
+}
+
 // ── the persistent store: device + soft keys, bindings, default ──────────────
 class IdentityStore {
 public:
@@ -99,8 +156,15 @@ public:
         try { m_j = json::parse(ss.str()); } catch (...) { m_j = json::object(); }
         ensureDevice();
     }
-    // meta json {id,kind,label,address,pubHex} for one identity id, or null.
+    // meta json {id,kind,label,address,pubHex[,domain]} for one identity id, or null.
     json metaFor(const std::string& id) {
+        // Keycard identities hold NO private key (the card does) — resolve them from the
+        // keycard array by public material. signDigest for these delegates to the keycard module.
+        for (auto& kc : m_j["keycard"])
+            if (kc["id"] == id)
+                return json{{"id", id}, {"kind", "keycard"}, {"label", kc.value("label", id)},
+                            {"address", kc.value("address", "")}, {"pubHex", kc.value("pubHex", "")},
+                            {"domain", kc.value("domain", "")}};
         SignId k = keyFor(id); if (!k.ok) return nullptr;
         std::string kind = id == "device" ? "device" : "soft";
         std::string label = id == "device" ? "This device" : labelOfSoft(id);
@@ -110,8 +174,31 @@ public:
         json arr = json::array();
         arr.push_back(metaFor("device"));
         for (auto& s : m_j["soft"]) arr.push_back(metaFor(s["id"].get<std::string>()));
-        // (keycard identity is added when the keycard-delegation layer lands — ADR 0016)
+        for (auto& kc : m_j["keycard"]) arr.push_back(metaFor(kc["id"].get<std::string>()));
         return arr;
+    }
+    // Record an enrolled keycard identity (public material only — the private key stays on the card).
+    // domain is the Keycard sign domain (e.g. "scala") whose m/43'/60'/1582'/… key this address is;
+    // it MUST match the mobile domainToSignPath domain so one physical card is one identity across
+    // phone + desktop. Returns the meta (or an {error}).
+    json addKeycardIdentity(const std::string& label, const std::string& domain,
+                            const std::string& address, const std::string& pubHex) {
+        if (address.empty() || pubHex.empty()) return json{{"error", "missing address/pubHex"}};
+        // de-dupe by address: re-enrolling the same card just relabels it.
+        for (auto& kc : m_j["keycard"])
+            if (kc["address"] == address) { kc["label"] = label; kc["domain"] = domain; save(); return metaFor(kc["id"].get<std::string>()); }
+        std::string id = "keycard-" + toHexS(sha256b(strBytes(pubHex)).data(), 6);
+        m_j["keycard"].push_back(json{{"id", id}, {"label", label}, {"domain", domain},
+                                      {"address", address}, {"pubHex", pubHex}});
+        save(); return metaFor(id);
+    }
+    void removeKeycardIdentity(const std::string& id) {
+        json keep = json::array();
+        for (auto& kc : m_j["keycard"]) if (kc["id"] != id) keep.push_back(kc);
+        m_j["keycard"] = keep;
+        for (auto it = m_j["bindings"].begin(); it != m_j["bindings"].end();)
+            if (it.value() == id) it = m_j["bindings"].erase(it); else ++it;
+        save();
     }
     json addSoftIdentity(const std::string& label) {
         SignId k = generateIdentity(); if (!k.ok) return json{{"error", "keygen failed"}};
@@ -148,6 +235,12 @@ public:
     // Sign a hex digest with the container's identity → {sig,pub,address} or {error}.
     json signDigest(const std::string& containerId, const std::string& digestHex) {
         std::string id = identityIdForContainer(containerId);
+        // Keycard identity → the private key is on the card; loam_core_impl delegates this to the
+        // keycard module (requestSign at 1582' + poll). Signal that here so a direct call is safe.
+        for (auto& kc : m_j["keycard"])
+            if (kc["id"] == id) return json{{"error", "keycard-delegated"}, {"kind", "keycard"},
+                                            {"domain", kc.value("domain", "")}, {"pubHex", kc.value("pubHex", "")},
+                                            {"address", kc.value("address", "")}};
         SignId k = keyFor(id);
         if (!k.ok) return json{{"error", "identity key unavailable"}};
         Bytes digest = fromHexB(digestHex);
@@ -167,6 +260,7 @@ private:
     void save() { std::ofstream f(m_path); if (f) f << m_j.dump(2); }
     void ensureDevice() {
         if (!m_j.contains("soft")) m_j["soft"] = json::array();
+        if (!m_j.contains("keycard")) m_j["keycard"] = json::array();
         if (!m_j.contains("bindings")) m_j["bindings"] = json::object();
         if (!m_j.contains("device") || !m_j["device"].contains("priv")) {
             SignId k = generateIdentity();
@@ -176,6 +270,7 @@ private:
     bool exists(const std::string& id) {
         if (id == "device") return true;
         for (auto& s : m_j["soft"]) if (s["id"] == id) return true;
+        for (auto& kc : m_j["keycard"]) if (kc["id"] == id) return true;
         return false;
     }
     std::string labelOfSoft(const std::string& id) {

@@ -5,6 +5,7 @@
 #include <deque>
 
 class QTimer;
+struct KcPending;                            // a pending keycard sign/enrol op — defined in the .cpp
 namespace loamid { class IdentityStore; }   // loam ADR 0004 identity service — defined in loam_identity.hpp (.cpp only)
 #include "logos_module_context.h"   // LogosModuleContext base + logos_events: + modules()
 #include "multibearer.hpp"          // IBearer + MultiBearer (std::string only, no LogosMap)
@@ -59,7 +60,20 @@ public:
     std::string bindContainer(std::string containerId, std::string identityId);
     std::string identityForContainer(std::string containerId);
     // Sign a 32-byte hex digest with the container's bound identity → {sig,pub,address} | {error}.
+    // For a device/soft identity this returns the signature synchronously; for a KEYCARD identity it
+    // returns {status:"keycard",...} and the app must instead call keycardSign (async, card tap).
     std::string signDigest(std::string containerId, std::string digestHex);
+
+    // --- keycard identity (loam ADR 0004 + scala ADR 0016) — async, card tap + PIN via keycard-ui.
+    // Enrol a physical Keycard as a loam identity: signs an enrol digest at the domain's 1582' path,
+    // recovers the card's public address (key never leaves the card), and records it. `domain` MUST
+    // match the mobile sign domain (e.g. "scala") so one card is one identity across phone + desktop.
+    // Returns {status:"pending",ref} immediately; the result arrives on keycardSignResult(ref, …).
+    std::string enrollKeycard(std::string label, std::string domain, std::string ref);
+    // Sign a 32-byte hex digest with a keycard-bound container's card (requestSign at 1582' + poll).
+    // Returns {status:"pending",ref}; the {sig,pub,address}|{error} arrives on keycardSignResult(ref).
+    std::string keycardSign(std::string containerId, std::string digestHex, std::string ref);
+    std::string removeKeycardIdentity(std::string id);
 
     // --- metrics API (loam_ui polls these) ---
     std::string metricsJson();
@@ -79,12 +93,18 @@ logos_events:
                   const std::string& payloadB64, int64_t ts);
     void metricsChanged(const std::string& metricsJson);
     void statusChanged(const std::string& status);
+    // Result of an async enrollKeycard / keycardSign, matched by the caller-chosen `ref`.
+    // resultJson = {sig,pub,address} | (enrol) {id,kind,label,address,pubHex,domain} | {error}.
+    void keycardSignResult(const std::string& ref, const std::string& resultJson);
 
 private:
     void ensureBearers(const std::string& cfgJson);   // build the delivery bearer (once)
     loamid::IdentityStore* idStore();                 // lazy-init the identity service on first use
     void setStatus(const std::string& s);
     void refreshMetrics();         // async getNodeInfo("Metrics") → peer count → metricsChanged
+    void startKeycardSign(std::shared_ptr<KcPending> p);   // requestSignAsync → begin polling
+    void pollKeycard(std::shared_ptr<KcPending> p);        // checkSignStatusAsync, self-reschedule
+    void finalizeKeycard(std::shared_ptr<KcPending> p, const std::string& sigHex);
 
     loam::MultiBearer m_bearers;
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers
