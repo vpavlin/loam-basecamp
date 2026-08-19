@@ -1,5 +1,5 @@
 // loam_identity.hpp — the loam identity SERVICE (loam ADR 0004). Key custody (device / named-soft;
-// Keycard delegated to Alisher's keycard module, added later), per-container binding, a default, and
+// Keycard delegated to Alisher's keycard module — see loam_core_impl), per-container binding, a default, and
 // signDigest(). Apps consume this over module IPC and never hold a private key; the identity UI stays
 // in each app's view. secp256k1 via OpenSSL — the SAME address derivation as the mobile registry
 // (address = "0x" + sha256(compressed-pubkey)[24:64]) so ONE key is one identity across phone+desktop.
