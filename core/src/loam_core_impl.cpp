@@ -302,30 +302,8 @@ void LoamCoreImpl::finalizeKeycard(std::shared_ptr<KcPending> p, const std::stri
     std::vector<unsigned char> compact = loamid::compact64LowS(sig);   // 65B R‖S‖V → 64B low-S r‖s
     if (compact.size() != 64) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard bad signature"}}.dump()); return; }
 
-    if (p->mode == "enroll") {
-        // Two ways the module can hand us the card's public key:
-        //  1) it returned the FULL card sign response (BER-TLV, >65B) → the pubkey is embedded as an
-        //     uncompressed point; take it verbatim (no recovery math, no recovery-id ambiguity).
-        //  2) it returned a bare 65B R‖S‖V recoverable sig → recover the pubkey via the recovery id.
-        loamid::SignId rec;
-        if (sig.size() > 65) rec = loamid::pubFromUncompressedBlob(sig);   // full-response path
-        if (!rec.ok) rec = loamid::ecdsaRecover(p->enrollDigest, sig);     // recoverable-sig path
-        if (!rec.ok) {
-            // Surface the exact bytes so a format mismatch (64B r‖s with no recovery id, DER, …) is
-            // diagnosable from one tap instead of guessing. Embedded in the error STRING so scala's
-            // overlay shows it verbatim; also logged. The signed payload is a public enrol digest,
-            // so the signature is not sensitive.
-            std::string sighex = loamid::toHexS(sig.data(), sig.size());
-            std::string emsg = "keycard pubkey recovery failed — siglen=" + std::to_string(sig.size()) + " sig=" + sighex;
-            fprintf(stderr, "[loam_core keycard] enrol %s\n", emsg.c_str()); fflush(stderr);
-            keycardSignResult(p->ref, nlohmann::json{{"error", emsg},
-                {"siglen", (int)sig.size()}, {"sighex", sighex}}.dump());
-            return;
-        }
-        nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, rec.address, rec.pubHex); }
-        keycardSignResult(p->ref, meta.dump());
-        return;
-    }
+    // enrol no longer reaches finalizeKeycard — it retrieves the card pubkey via the auth flow
+    // (startKeycardAuth/pollKeycardAuth/finalizeEnroll). Only the SIGN path lands here.
     // sign: guard that the signing card IS the enrolled identity (compare its pubkey), then return.
     // The card's pubkey comes either embedded in a full response (>65B) or by recovering from a
     // 65B R‖S‖V; either way, a mismatch means the wrong card tapped.
@@ -341,14 +319,58 @@ void LoamCoreImpl::finalizeKeycard(std::shared_ptr<KcPending> p, const std::stri
     keycardSignResult(p->ref, nlohmann::json{{"sig", loamid::toHexS(compact.data(), 64)}, {"pub", p->pubHex}, {"address", p->address}}.dump());
 }
 
+// Enrol = learn the card's PUBLIC KEY for this domain, without ever recovering it from a signature.
+// The keycard module exports the key at the domain's sign path via requestAuth → checkAuthStatus
+// (which returns `pubkeyBytes`). Because both requestAuth(domain) and requestSign(domain) key off the
+// SAME domain→sign-path, the enrolled key is exactly the one that will later sign — so events verify.
+void LoamCoreImpl::startKeycardAuth(std::shared_ptr<KcPending> p) {
+    modules().keycard.requestAuthAsync(p->domain, "loam", [this, p](std::string res) {
+        nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
+        if (!r.is_object() || !r.contains("authId")) {
+            keycardSignResult(p->ref, nlohmann::json{{"error", "keycard requestAuth failed"}, {"detail", res}}.dump());
+            return;
+        }
+        p->signId = r["authId"].get<std::string>();   // reuse the id slot for the authId
+        pollKeycardAuth(p);
+    });
+}
+
+void LoamCoreImpl::pollKeycardAuth(std::shared_ptr<KcPending> p) {
+    modules().keycard.checkAuthStatusAsync(p->signId, [this, p](std::string res) {
+        nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
+        const std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
+        std::string pub;
+        if (r.is_object()) { pub = r.value("pubkeyBytes", std::string()); if (pub.empty()) pub = r.value("key", std::string()); }
+        if (!pub.empty()) { finalizeEnroll(p, pub); return; }          // key retrieved → done
+        if (status == "failed" || (r.is_object() && r.contains("error") && status != "pending")) {
+            keycardSignResult(p->ref, nlohmann::json{{"error", r.is_object() ? r.value("error", std::string("keycard auth failed")) : std::string("keycard auth failed")}}.dump());
+            return;
+        }
+        if (++p->polls > 180) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard auth timeout"}}.dump()); return; }
+        QTimer::singleShot(1000, [this, p] { pollKeycardAuth(p); });
+    });
+}
+
+void LoamCoreImpl::finalizeEnroll(std::shared_ptr<KcPending> p, const std::string& pubHex) {
+    loamid::Bytes pub = loamid::fromHexB(pubHex);
+    loamid::SignId id = loamid::identityFromCardPub(pub);          // 65B/33B card pubkey → loam identity
+    if (!id.ok) id = loamid::pubFromUncompressedBlob(pub);         // or dig it out of a TLV/pubkey+chain blob
+    if (!id.ok) {
+        std::string emsg = "keycard: could not parse card pubkey — len=" + std::to_string(pub.size()) + " pub=" + pubHex;
+        fprintf(stderr, "[loam_core keycard] enrol %s\n", emsg.c_str()); fflush(stderr);
+        keycardSignResult(p->ref, nlohmann::json{{"error", emsg}}.dump());
+        return;
+    }
+    nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, id.address, id.pubHex); }
+    keycardSignResult(p->ref, meta.dump());
+}
+
 std::string LoamCoreImpl::enrollKeycard(std::string label, std::string domain, std::string ref) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (domain.empty()) return "{\"error\":\"domain required\"}";
     auto p = std::make_shared<KcPending>();
     p->mode = "enroll"; p->ref = ref; p->domain = domain; p->label = label.empty() ? domain : label;
-    p->enrollDigest = loamid::sha256b(loamid::strBytes("loam-keycard-enroll-v1:" + domain));
-    p->digestHex = loamid::toHexS(p->enrollDigest.data(), 32);
-    startKeycardSign(p);
+    startKeycardAuth(p);
     return nlohmann::json{{"status", "pending"}, {"ref", ref}}.dump();
 }
 

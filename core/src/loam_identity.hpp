@@ -129,6 +129,31 @@ inline SignId ecdsaRecover(const Bytes& digest32, const Bytes& sig65) {
     return id;
 }
 
+// Turn a card-provided public key (65B uncompressed 0x04‖X‖Y, or 33B compressed) into a loam
+// identity: compressed pubHex + address = "0x"+sha256(compressed)[24:64]. Used at ENROL, where the
+// keycard module hands us the card's pubkey directly (requestAuth/checkAuthStatus → pubkeyBytes) so
+// we never recover it from a signature.
+inline SignId identityFromCardPub(const Bytes& pub) {
+    SignId id;
+    bool shaped = (pub.size() == 65 && pub[0] == 0x04) ||
+                  (pub.size() == 33 && (pub[0] == 0x02 || pub[0] == 0x03));
+    if (!shaped) return id;
+    EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1);
+    BN_CTX* ctx = BN_CTX_new();
+    EC_POINT* P = EC_POINT_new(grp);
+    if (EC_POINT_oct2point(grp, P, pub.data(), pub.size(), ctx) == 1) {   // on-curve check
+        Bytes pubc(33);
+        if (EC_POINT_point2oct(grp, P, POINT_CONVERSION_COMPRESSED, pubc.data(), 33, ctx) == 33) {
+            id.pub = pubc; id.pubHex = toHexS(pubc.data(), 33);
+            Bytes h = sha256b(pubc);
+            id.address = "0x" + toHexS(h.data(), 32).substr(24, 40);
+            id.ok = true;
+        }
+    }
+    EC_POINT_free(P); BN_CTX_free(ctx); EC_GROUP_free(grp);
+    return id;
+}
+
 // Extract an EC public key embedded as an UNCOMPRESSED point (0x04‖X32‖Y32) anywhere inside a blob,
 // used when the keycard module returns the card's FULL sign response (BER-TLV) rather than a bare
 // 65-byte recoverable sig — the full response carries the card's public key directly (the same key
