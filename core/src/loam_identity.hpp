@@ -238,6 +238,41 @@ inline Bytes compact64LowS(const Bytes& sig) {
     return out;
 }
 
+// Parse a DER ECDSA signature (whole blob, or a SEQUENCE embedded in a larger response) into its
+// 32-byte-left-padded r and s. Falls back to a raw 64B r‖s. Keeps r,s EXACTLY as signed (no low-S)
+// because public-key recovery is sensitive to the actual s value.
+inline bool derToRS(const Bytes& blob, Bytes& r32, Bytes& s32) {
+    for (size_t i = 0; i + 8 <= blob.size(); i++) {
+        if (blob[i] != 0x30) continue;
+        const unsigned char* p = blob.data() + i;
+        ECDSA_SIG* sig = d2i_ECDSA_SIG(nullptr, &p, (long)(blob.size() - i));
+        if (!sig) continue;
+        const BIGNUM *r, *s; ECDSA_SIG_get0(sig, &r, &s);
+        r32.assign(32, 0); s32.assign(32, 0);
+        BN_bn2binpad(r, r32.data(), 32); BN_bn2binpad(s, s32.data(), 32);
+        ECDSA_SIG_free(sig);
+        return true;
+    }
+    if (blob.size() >= 64) { r32.assign(blob.begin(), blob.begin() + 32); s32.assign(blob.begin() + 32, blob.begin() + 64); return true; }
+    return false;
+}
+
+// Recover the ≤2 candidate public keys from an ECDSA (r,s) over a known digest (recovery id 0/1).
+// The signer's true key is whichever candidate is COMMON to two signatures over different digests —
+// so enrol signs twice and intersects, disambiguating without any recovery id from the card.
+inline std::vector<SignId> recoverCandidates(const Bytes& digest32, const Bytes& r32, const Bytes& s32) {
+    std::vector<SignId> out;
+    for (int v = 0; v < 2; v++) {
+        Bytes sig65; sig65.reserve(65);
+        sig65.insert(sig65.end(), r32.begin(), r32.end());
+        sig65.insert(sig65.end(), s32.begin(), s32.end());
+        sig65.push_back((unsigned char)v);
+        SignId id = ecdsaRecover(digest32, sig65);
+        if (id.ok) out.push_back(id);
+    }
+    return out;
+}
+
 // ── the persistent store: device + soft keys, bindings, default ──────────────
 class IdentityStore {
 public:

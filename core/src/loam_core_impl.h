@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 #include <memory>
 #include <mutex>
@@ -105,9 +106,9 @@ private:
     void startKeycardSign(std::shared_ptr<KcPending> p);   // requestSignAsync → begin polling
     void pollKeycard(std::shared_ptr<KcPending> p);        // checkSignStatusAsync, self-reschedule
     void finalizeKeycard(std::shared_ptr<KcPending> p, const std::string& sigHex);
-    void startKeycardAuth(std::shared_ptr<KcPending> p);   // enrol: requestAuthAsync → begin polling
-    void pollKeycardAuth(std::shared_ptr<KcPending> p);    // checkAuthStatusAsync, self-reschedule
-    void retrieveKeyViaDerive(std::shared_ptr<KcPending> p); // enrol: deriveKeyAsync → full pubkey → store
+    // enrol: sign a raw digest and hand back the DER sig hex (requestSign + self-scheduling poll).
+    void signDigestRaw(const std::string& domain, const std::string& digestHex,
+                       std::function<void(std::string, std::string)> done);
 
     loam::MultiBearer m_bearers;
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers

@@ -320,82 +320,69 @@ void LoamCoreImpl::finalizeKeycard(std::shared_ptr<KcPending> p, const std::stri
     keycardSignResult(p->ref, nlohmann::json{{"sig", loamid::toHexS(compact.data(), 64)}, {"pub", p->pubHex}, {"address", p->address}}.dump());
 }
 
-// Enrol = learn the card's PUBLIC KEY for this domain, without ever recovering it from a signature.
-// The keycard module exports the key at the domain's sign path via requestAuth → checkAuthStatus
-// (which returns `pubkeyBytes`). Because both requestAuth(domain) and requestSign(domain) key off the
-// SAME domain→sign-path, the enrolled key is exactly the one that will later sign — so events verify.
-void LoamCoreImpl::startKeycardAuth(std::shared_ptr<KcPending> p) {
-    modules().keycard.requestAuthAsync(p->domain, "loam", [this, p](std::string res) {
+// One async "sign a raw 32B digest, hand back the DER signature hex" primitive: requestSign →
+// self-rescheduling checkSignStatus poll → done(sigHex, "") or done("", err). Shared by the two-sign
+// enrol flow. State is a heap struct kept alive by the capturing lambdas + a self-referencing poller.
+struct RawSignState { std::string signId; int polls = 0; std::function<void(std::string, std::string)> done; };
+
+void LoamCoreImpl::signDigestRaw(const std::string& domain, const std::string& digestHex,
+                                 std::function<void(std::string, std::string)> done) {
+    auto st = std::make_shared<RawSignState>(); st->done = std::move(done);
+    auto poll = std::make_shared<std::function<void()>>();
+    *poll = [this, st, poll]() {
+        modules().keycard.checkSignStatusAsync(st->signId, [st, poll](std::string res) {
+            nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
+            const std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
+            if (status == "complete" && r.contains("signature")) { st->done(r["signature"].get<std::string>(), ""); return; }
+            if (status == "failed" || (r.is_object() && r.contains("error"))) { st->done("", r.is_object() ? r.value("error", status) : status); return; }
+            if (++st->polls > 180) { st->done("", "keycard sign timeout"); return; }
+            QTimer::singleShot(1000, [poll] { (*poll)(); });
+        });
+    };
+    nlohmann::json args{{"domain", domain}, {"payloadHash", digestHex}, {"caller", "loam"}, {"scheme", "ecdsa"}};
+    modules().keycard.requestSignAsync(args.dump(), [st, poll](std::string res) {
         nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-        if (!r.is_object() || !r.contains("authId")) {
-            keycardSignResult(p->ref, nlohmann::json{{"error", "keycard requestAuth failed"}, {"detail", res}}.dump());
-            return;
-        }
-        p->signId = r["authId"].get<std::string>();   // reuse the id slot for the authId
-        pollKeycardAuth(p);
+        if (!r.is_object() || !r.contains("signId")) { st->done("", "keycard requestSign failed: " + res); return; }
+        st->signId = r["signId"].get<std::string>();
+        (*poll)();
     });
 }
 
-// Pull a public key out of ANY module response: JSON string fields (that are pure hex) or a bare hex
-// body; try each as 33/65/64/97-byte or TLV-embedded (identityFromCardPubLoose). A bare 32B X has no
-// parity and is rejected upstream.
-static bool allHex(const std::string& s) {
-    if (s.empty() || s.size() % 2) return false;
-    for (char c : s) if (!std::isxdigit((unsigned char)c)) return false;
-    return true;
-}
-static loamid::SignId identityFromResponse(const std::string& res) {
-    std::vector<std::string> cands;
-    nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-    if (r.is_object()) for (auto& el : r.items()) if (el.value().is_string() && allHex(el.value().get<std::string>())) cands.push_back(el.value().get<std::string>());
-    if (allHex(res)) cands.push_back(res);
-    for (const auto& h : cands) {
-        loamid::Bytes b = loamid::fromHexB(h);
-        if (b.size() >= 33) { loamid::SignId id = loamid::identityFromCardPubLoose(b); if (id.ok) return id; }
-    }
-    return loamid::SignId{};
-}
-
-void LoamCoreImpl::pollKeycardAuth(std::shared_ptr<KcPending> p) {
-    modules().keycard.checkAuthStatusAsync(p->signId, [this, p](std::string res) {
-        nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-        std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
-        std::string lower = status; for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-        std::string pub;
-        if (r.is_object()) { pub = r.value("pubkeyBytes", std::string()); if (pub.empty()) pub = r.value("key", std::string()); }
-        // The auth response only carries the X-coordinate (32B, no parity) — not enough for an address.
-        // Once authorised the secure channel is open, so pull the FULL key (65B) via deriveKey.
-        if (!pub.empty() || lower.find("authoriz") != std::string::npos) { retrieveKeyViaDerive(p); return; }
-        if (status == "failed" || (r.is_object() && r.contains("error") && lower != "pending")) {
-            keycardSignResult(p->ref, nlohmann::json{{"error", r.is_object() ? r.value("error", std::string("keycard auth failed")) : std::string("keycard auth failed")}}.dump());
-            return;
-        }
-        if (++p->polls > 180) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard auth timeout"}}.dump()); return; }
-        QTimer::singleShot(1000, [this, p] { pollKeycardAuth(p); });
-    });
-}
-
-void LoamCoreImpl::retrieveKeyViaDerive(std::shared_ptr<KcPending> p) {
-    modules().keycard.deriveKeyAsync(p->domain, [this, p](std::string res) {
-        fprintf(stderr, "[loam_core keycard] deriveKey raw=%s\n", res.c_str()); fflush(stderr);
-        loamid::SignId id = identityFromResponse(res);
-        if (!id.ok) {
-            std::string emsg = "keycard: could not parse card pubkey from deriveKey — " + res;
-            fprintf(stderr, "[loam_core keycard] enrol %s\n", emsg.c_str()); fflush(stderr);
-            keycardSignResult(p->ref, nlohmann::json{{"error", emsg}}.dump());
-            return;
-        }
-        nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, id.address, id.pubHex); }
-        keycardSignResult(p->ref, meta.dump());
-    });
-}
-
+// Enrol needs the card's PUBLIC KEY at the domain's SIGN path. The module returns only a bare DER
+// signature (no recovery id, no pubkey), and its key-export paths give a bare X-coordinate or need a
+// PIN session we don't hold. So determine the key purely from SIGN — the exact path events use: sign
+// TWO distinct enrol digests, recover the ≤2 candidate pubkeys from each, and take the ONE common to
+// both. That intersection is uniquely the card's signing key, so enrolled key == future signing key.
 std::string LoamCoreImpl::enrollKeycard(std::string label, std::string domain, std::string ref) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (domain.empty()) return "{\"error\":\"domain required\"}";
-    auto p = std::make_shared<KcPending>();
-    p->mode = "enroll"; p->ref = ref; p->domain = domain; p->label = label.empty() ? domain : label;
-    startKeycardAuth(p);
+    std::string lbl = label.empty() ? domain : label;
+    loamid::Bytes dA = loamid::sha256b(loamid::strBytes("loam-keycard-enroll-v1:" + domain));
+    loamid::Bytes dB = loamid::sha256b(loamid::strBytes("loam-keycard-enroll-v2:" + domain));
+    std::string hexA = loamid::toHexS(dA.data(), 32), hexB = loamid::toHexS(dB.data(), 32);
+
+    signDigestRaw(domain, hexA, [this, ref, domain, lbl, dA, dB, hexB](std::string sigA, std::string errA) {
+        if (sigA.empty() || !errA.empty()) { keycardSignResult(ref, nlohmann::json{{"error", "keycard enrol sign 1 failed: " + errA}}.dump()); return; }
+        loamid::Bytes rA, sA;
+        if (!loamid::derToRS(loamid::fromHexB(sigA), rA, sA)) { keycardSignResult(ref, nlohmann::json{{"error", "keycard enrol: could not parse sig 1"}}.dump()); return; }
+        auto candA = std::make_shared<std::vector<loamid::SignId>>(loamid::recoverCandidates(dA, rA, sA));
+
+        signDigestRaw(domain, hexB, [this, ref, domain, lbl, dB, candA](std::string sigB, std::string errB) {
+            if (sigB.empty() || !errB.empty()) { keycardSignResult(ref, nlohmann::json{{"error", "keycard enrol sign 2 failed: " + errB}}.dump()); return; }
+            loamid::Bytes rB, sB;
+            if (!loamid::derToRS(loamid::fromHexB(sigB), rB, sB)) { keycardSignResult(ref, nlohmann::json{{"error", "keycard enrol: could not parse sig 2"}}.dump()); return; }
+            std::vector<loamid::SignId> candB = loamid::recoverCandidates(dB, rB, sB);
+            loamid::SignId match; int n = 0;
+            for (const auto& a : *candA) for (const auto& b : candB)
+                if (a.ok && !a.pubHex.empty() && a.pubHex == b.pubHex) { match = a; n++; }
+            if (n != 1 || !match.ok) {
+                keycardSignResult(ref, nlohmann::json{{"error", "keycard enrol: could not determine a unique pubkey (matches=" + std::to_string(n) + ")"}}.dump());
+                return;
+            }
+            nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(lbl, domain, match.address, match.pubHex); }
+            keycardSignResult(ref, meta.dump());
+        });
+    });
     return nlohmann::json{{"status", "pending"}, {"ref", ref}}.dump();
 }
 
