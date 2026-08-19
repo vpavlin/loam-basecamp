@@ -107,7 +107,7 @@ private:
     void finalizeKeycard(std::shared_ptr<KcPending> p, const std::string& sigHex);
     void startKeycardAuth(std::shared_ptr<KcPending> p);   // enrol: requestAuthAsync → begin polling
     void pollKeycardAuth(std::shared_ptr<KcPending> p);    // checkAuthStatusAsync, self-reschedule
-    void finalizeEnroll(std::shared_ptr<KcPending> p, const std::string& pubHex);
+    void retrieveKeyViaDerive(std::shared_ptr<KcPending> p); // enrol: deriveKeyAsync → full pubkey → store
 
     loam::MultiBearer m_bearers;
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers

@@ -154,6 +154,22 @@ inline SignId identityFromCardPub(const Bytes& pub) {
     return id;
 }
 
+// Try every plausible shape the card/module hands a public key in: 33B compressed, 65B uncompressed,
+// 64B raw X‖Y (prepend 0x04), or an uncompressed point embedded in a larger blob (BER-TLV, or
+// pubkey‖chaincode = 97B). Returns ok=false for a bare 32B X (no parity byte → genuinely unusable).
+inline SignId identityFromCardPub(const Bytes& pub);  // fwd
+inline SignId pubFromUncompressedBlob(const Bytes& blob);  // fwd
+inline SignId identityFromCardPubLoose(const Bytes& b) {
+    SignId id = identityFromCardPub(b);                        // exact 33 / 65
+    if (id.ok) return id;
+    if (b.size() >= 64) {                                      // raw X‖Y → synthesise 0x04‖X‖Y
+        Bytes u; u.reserve(65); u.push_back(0x04);
+        u.insert(u.end(), b.begin(), b.begin() + 64);
+        id = identityFromCardPub(u); if (id.ok) return id;
+    }
+    return pubFromUncompressedBlob(b);                         // scan for an embedded 0x04‖X‖Y
+}
+
 // Extract an EC public key embedded as an UNCOMPRESSED point (0x04‖X32‖Y32) anywhere inside a blob,
 // used when the keycard module returns the card's FULL sign response (BER-TLV) rather than a bare
 // 65-byte recoverable sig — the full response carries the card's public key directly (the same key

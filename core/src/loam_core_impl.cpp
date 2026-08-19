@@ -1,6 +1,7 @@
 // loam_core_impl.cpp — the facade wiring. Builds the delivery bearer's Ops from
 // modules().delivery_module.* (where the generated type is complete), funnels receives
 // through the MultiBearer dedup into the `received` event, and polls delivery metrics.
+#include <cctype>
 #include "loam_core_impl.h"
 #include "logos_sdk.h"          // umbrella: complete LogosModules + LogosMap (nlohmann::json)
 #include "delivery_bearer.hpp"  // DeliveryBearer<LogosMap> (needs LogosMap → after logos_sdk.h)
@@ -335,14 +336,37 @@ void LoamCoreImpl::startKeycardAuth(std::shared_ptr<KcPending> p) {
     });
 }
 
+// Pull a public key out of ANY module response: JSON string fields (that are pure hex) or a bare hex
+// body; try each as 33/65/64/97-byte or TLV-embedded (identityFromCardPubLoose). A bare 32B X has no
+// parity and is rejected upstream.
+static bool allHex(const std::string& s) {
+    if (s.empty() || s.size() % 2) return false;
+    for (char c : s) if (!std::isxdigit((unsigned char)c)) return false;
+    return true;
+}
+static loamid::SignId identityFromResponse(const std::string& res) {
+    std::vector<std::string> cands;
+    nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
+    if (r.is_object()) for (auto& el : r.items()) if (el.value().is_string() && allHex(el.value().get<std::string>())) cands.push_back(el.value().get<std::string>());
+    if (allHex(res)) cands.push_back(res);
+    for (const auto& h : cands) {
+        loamid::Bytes b = loamid::fromHexB(h);
+        if (b.size() >= 33) { loamid::SignId id = loamid::identityFromCardPubLoose(b); if (id.ok) return id; }
+    }
+    return loamid::SignId{};
+}
+
 void LoamCoreImpl::pollKeycardAuth(std::shared_ptr<KcPending> p) {
     modules().keycard.checkAuthStatusAsync(p->signId, [this, p](std::string res) {
         nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-        const std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
+        std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
+        std::string lower = status; for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
         std::string pub;
         if (r.is_object()) { pub = r.value("pubkeyBytes", std::string()); if (pub.empty()) pub = r.value("key", std::string()); }
-        if (!pub.empty()) { finalizeEnroll(p, pub); return; }          // key retrieved → done
-        if (status == "failed" || (r.is_object() && r.contains("error") && status != "pending")) {
+        // The auth response only carries the X-coordinate (32B, no parity) — not enough for an address.
+        // Once authorised the secure channel is open, so pull the FULL key (65B) via deriveKey.
+        if (!pub.empty() || lower.find("authoriz") != std::string::npos) { retrieveKeyViaDerive(p); return; }
+        if (status == "failed" || (r.is_object() && r.contains("error") && lower != "pending")) {
             keycardSignResult(p->ref, nlohmann::json{{"error", r.is_object() ? r.value("error", std::string("keycard auth failed")) : std::string("keycard auth failed")}}.dump());
             return;
         }
@@ -351,18 +375,19 @@ void LoamCoreImpl::pollKeycardAuth(std::shared_ptr<KcPending> p) {
     });
 }
 
-void LoamCoreImpl::finalizeEnroll(std::shared_ptr<KcPending> p, const std::string& pubHex) {
-    loamid::Bytes pub = loamid::fromHexB(pubHex);
-    loamid::SignId id = loamid::identityFromCardPub(pub);          // 65B/33B card pubkey → loam identity
-    if (!id.ok) id = loamid::pubFromUncompressedBlob(pub);         // or dig it out of a TLV/pubkey+chain blob
-    if (!id.ok) {
-        std::string emsg = "keycard: could not parse card pubkey — len=" + std::to_string(pub.size()) + " pub=" + pubHex;
-        fprintf(stderr, "[loam_core keycard] enrol %s\n", emsg.c_str()); fflush(stderr);
-        keycardSignResult(p->ref, nlohmann::json{{"error", emsg}}.dump());
-        return;
-    }
-    nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, id.address, id.pubHex); }
-    keycardSignResult(p->ref, meta.dump());
+void LoamCoreImpl::retrieveKeyViaDerive(std::shared_ptr<KcPending> p) {
+    modules().keycard.deriveKeyAsync(p->domain, [this, p](std::string res) {
+        fprintf(stderr, "[loam_core keycard] deriveKey raw=%s\n", res.c_str()); fflush(stderr);
+        loamid::SignId id = identityFromResponse(res);
+        if (!id.ok) {
+            std::string emsg = "keycard: could not parse card pubkey from deriveKey — " + res;
+            fprintf(stderr, "[loam_core keycard] enrol %s\n", emsg.c_str()); fflush(stderr);
+            keycardSignResult(p->ref, nlohmann::json{{"error", emsg}}.dump());
+            return;
+        }
+        nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, id.address, id.pubHex); }
+        keycardSignResult(p->ref, meta.dump());
+    });
 }
 
 std::string LoamCoreImpl::enrollKeycard(std::string label, std::string domain, std::string ref) {
