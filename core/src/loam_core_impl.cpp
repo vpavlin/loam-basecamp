@@ -312,10 +312,14 @@ void LoamCoreImpl::finalizeKeycard(std::shared_ptr<KcPending> p, const std::stri
         if (!rec.ok) rec = loamid::ecdsaRecover(p->enrollDigest, sig);     // recoverable-sig path
         if (!rec.ok) {
             // Surface the exact bytes so a format mismatch (64B r‖s with no recovery id, DER, …) is
-            // diagnosable from one tap instead of guessing. The signed payload is a public enrol
-            // digest, so the signature is not sensitive.
-            keycardSignResult(p->ref, nlohmann::json{{"error", "keycard pubkey recovery failed"},
-                {"siglen", (int)sig.size()}, {"sighex", loamid::toHexS(sig.data(), sig.size())}}.dump());
+            // diagnosable from one tap instead of guessing. Embedded in the error STRING so scala's
+            // overlay shows it verbatim; also logged. The signed payload is a public enrol digest,
+            // so the signature is not sensitive.
+            std::string sighex = loamid::toHexS(sig.data(), sig.size());
+            std::string emsg = "keycard pubkey recovery failed — siglen=" + std::to_string(sig.size()) + " sig=" + sighex;
+            fprintf(stderr, "[loam_core keycard] enrol %s\n", emsg.c_str()); fflush(stderr);
+            keycardSignResult(p->ref, nlohmann::json{{"error", emsg},
+                {"siglen", (int)sig.size()}, {"sighex", sighex}}.dump());
             return;
         }
         nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, rec.address, rec.pubHex); }
