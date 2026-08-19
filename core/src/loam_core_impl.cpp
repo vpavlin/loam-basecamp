@@ -303,15 +303,32 @@ void LoamCoreImpl::finalizeKeycard(std::shared_ptr<KcPending> p, const std::stri
     if (compact.size() != 64) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard bad signature"}}.dump()); return; }
 
     if (p->mode == "enroll") {
-        loamid::SignId rec = loamid::ecdsaRecover(p->enrollDigest, sig);   // pubkey from R‖S‖V
-        if (!rec.ok) { keycardSignResult(p->ref, nlohmann::json{{"error", "keycard pubkey recovery failed"}}.dump()); return; }
+        // Two ways the module can hand us the card's public key:
+        //  1) it returned the FULL card sign response (BER-TLV, >65B) → the pubkey is embedded as an
+        //     uncompressed point; take it verbatim (no recovery math, no recovery-id ambiguity).
+        //  2) it returned a bare 65B R‖S‖V recoverable sig → recover the pubkey via the recovery id.
+        loamid::SignId rec;
+        if (sig.size() > 65) rec = loamid::pubFromUncompressedBlob(sig);   // full-response path
+        if (!rec.ok) rec = loamid::ecdsaRecover(p->enrollDigest, sig);     // recoverable-sig path
+        if (!rec.ok) {
+            // Surface the exact bytes so a format mismatch (64B r‖s with no recovery id, DER, …) is
+            // diagnosable from one tap instead of guessing. The signed payload is a public enrol
+            // digest, so the signature is not sensitive.
+            keycardSignResult(p->ref, nlohmann::json{{"error", "keycard pubkey recovery failed"},
+                {"siglen", (int)sig.size()}, {"sighex", loamid::toHexS(sig.data(), sig.size())}}.dump());
+            return;
+        }
         nlohmann::json meta; { std::lock_guard<std::recursive_mutex> lk(m_mtx); meta = idStore()->addKeycardIdentity(p->label, p->domain, rec.address, rec.pubHex); }
         keycardSignResult(p->ref, meta.dump());
         return;
     }
-    // sign: guard that the signing card IS the enrolled identity (recover pub, compare), then return.
-    if (sig.size() == 65 && !p->pubHex.empty()) {
-        loamid::SignId rec = loamid::ecdsaRecover(loamid::fromHexB(p->digestHex), sig);
+    // sign: guard that the signing card IS the enrolled identity (compare its pubkey), then return.
+    // The card's pubkey comes either embedded in a full response (>65B) or by recovering from a
+    // 65B R‖S‖V; either way, a mismatch means the wrong card tapped.
+    if (!p->pubHex.empty()) {
+        loamid::SignId rec;
+        if (sig.size() > 65) rec = loamid::pubFromUncompressedBlob(sig);
+        if (!rec.ok && sig.size() == 65) rec = loamid::ecdsaRecover(loamid::fromHexB(p->digestHex), sig);
         if (rec.ok && rec.pubHex != p->pubHex) {
             keycardSignResult(p->ref, nlohmann::json{{"error", "wrong card — signed by " + rec.address + ", expected " + p->address}}.dump());
             return;

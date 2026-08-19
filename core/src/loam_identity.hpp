@@ -129,20 +129,71 @@ inline SignId ecdsaRecover(const Bytes& digest32, const Bytes& sig65) {
     return id;
 }
 
-// Normalise a card signature (65B R‖S‖V from Keycard's signWithPath, or a bare 64B r‖s) to the
-// 64-byte LOW-S r‖s that scala/loam verify expects. Dropping V is safe — the event stores e.pub,
-// so verification never needs recovery. Flipping s→n−s stays a valid signature (canonical low-S).
+// Extract an EC public key embedded as an UNCOMPRESSED point (0x04‖X32‖Y32) anywhere inside a blob,
+// used when the keycard module returns the card's FULL sign response (BER-TLV) rather than a bare
+// 65-byte recoverable sig — the full response carries the card's public key directly (the same key
+// signWithPathFullResponse exposes), so we take it verbatim instead of recovering it from R‖S‖V.
+// Only a point that actually lies on secp256k1 is accepted, so a stray 0x04 byte can't false-match.
+inline SignId pubFromUncompressedBlob(const Bytes& blob) {
+    SignId id;
+    if (blob.size() < 65) return id;
+    EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1);
+    BN_CTX* ctx = BN_CTX_new();
+    EC_POINT* P = EC_POINT_new(grp);
+    for (size_t i = 0; i + 65 <= blob.size(); i++) {
+        if (blob[i] != 0x04) continue;
+        if (EC_POINT_oct2point(grp, P, blob.data() + i, 65, ctx) != 1) continue;  // on-curve check
+        Bytes pubc(33);
+        if (EC_POINT_point2oct(grp, P, POINT_CONVERSION_COMPRESSED, pubc.data(), 33, ctx) == 33) {
+            id.pub = pubc; id.pubHex = toHexS(pubc.data(), 33);
+            Bytes h = sha256b(pubc);
+            id.address = "0x" + toHexS(h.data(), 32).substr(24, 40);
+            id.ok = true;
+            break;
+        }
+    }
+    EC_POINT_free(P); BN_CTX_free(ctx); EC_GROUP_free(grp);
+    return id;
+}
+
+// Normalise whatever the keycard module hands back to the 64-byte LOW-S r‖s that scala/loam verify
+// expect. The module may return a bare 64B r‖s, a 65B R‖S‖V (drop V), a DER-encoded ECDSA sig, or
+// the card's full BER-TLV sign response with a DER sig embedded in it. We read r,s robustly:
+//   - exactly 64/65 bytes → treat as raw r‖s (compact / recoverable) — the common, known forms;
+//   - otherwise → scan for a DER SEQUENCE (0x30…) and parse it with OpenSSL, so a DER or full-
+//     response blob yields the SAME r,s a naive first-64-bytes read would have mangled.
+// Dropping V is safe — the event stores e.pub, so verification never needs recovery. Flipping
+// s→n−s stays a valid signature (canonical low-S). r/s are left-padded to 32 (Keycard emits them
+// minimal-length, so a short r or s must not shift the compact layout).
 inline Bytes compact64LowS(const Bytes& sig) {
     if (sig.size() < 64) return {};
     EC_GROUP* grp = EC_GROUP_new_by_curve_name(NID_secp256k1); BN_CTX* ctx = BN_CTX_new();
     BIGNUM* order = BN_new(); EC_GROUP_get_order(grp, order, ctx);
     BIGNUM* half = BN_new(); BN_rshift1(half, order);
-    BIGNUM* sb = BN_bin2bn(sig.data() + 32, 32, nullptr);
+
+    BIGNUM* rb = nullptr; BIGNUM* sb = nullptr;
+    ECDSA_SIG* der = nullptr;
+    if (sig.size() != 64 && sig.size() != 65) {          // not a known compact form → look for DER
+        for (size_t i = 0; i + 8 <= sig.size(); i++) {
+            if (sig[i] != 0x30) continue;
+            const unsigned char* p = sig.data() + i;
+            ECDSA_SIG* cand = d2i_ECDSA_SIG(nullptr, &p, (long)(sig.size() - i));
+            if (!cand) continue;
+            const BIGNUM *cr, *cs; ECDSA_SIG_get0(cand, &cr, &cs);
+            if (cr && cs && !BN_is_zero(cr) && !BN_is_zero(cs)
+                && BN_cmp(cr, order) < 0 && BN_cmp(cs, order) < 0) { der = cand; break; }
+            ECDSA_SIG_free(cand);
+        }
+    }
+    if (der) { const BIGNUM *cr, *cs; ECDSA_SIG_get0(der, &cr, &cs); rb = BN_dup(cr); sb = BN_dup(cs); }
+    else { rb = BN_bin2bn(sig.data(), 32, nullptr); sb = BN_bin2bn(sig.data() + 32, 32, nullptr); }
+
     if (BN_cmp(sb, half) > 0) BN_sub(sb, order, sb);        // low-S
     Bytes out(64, 0);
-    std::copy(sig.begin(), sig.begin() + 32, out.begin());  // r
-    BN_bn2binpad(sb, out.data() + 32, 32);                  // s (low)
-    BN_free(sb); BN_free(half); BN_free(order); BN_CTX_free(ctx); EC_GROUP_free(grp);
+    BN_bn2binpad(rb, out.data(), 32);                       // r (left-padded)
+    BN_bn2binpad(sb, out.data() + 32, 32);                  // s (low, left-padded)
+    if (der) ECDSA_SIG_free(der);
+    BN_free(rb); BN_free(sb); BN_free(half); BN_free(order); BN_CTX_free(ctx); EC_GROUP_free(grp);
     return out;
 }
 
