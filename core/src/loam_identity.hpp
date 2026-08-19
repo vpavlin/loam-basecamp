@@ -354,8 +354,17 @@ public:
         if (m_j["bindings"].contains(c)) return m_j["bindings"][c].get<std::string>(); return "";
     }
     void bindContainer(const std::string& c, const std::string& id) { m_j["bindings"][c] = id; save(); }
+    bool isKeycardId(const std::string& id) {
+        for (auto& kc : m_j["keycard"]) if (kc["id"] == id) return true; return false;
+    }
     std::string identityIdForContainer(const std::string& c) {
-        std::string b = bindingFor(c); if (!b.empty() && exists(b)) return b; return getDefaultIdentityId();
+        std::string b = bindingFor(c);
+        if (!b.empty() && exists(b)) return b;         // explicit per-container binding wins (incl. keycard)
+        // Fall back to the default — but a KEYCARD is only ever a signer when a container is EXPLICITLY
+        // bound to it. Otherwise every unbound calendar would demand a card tap the moment the keycard
+        // is the default. So a keycard default never silently signs; unbound falls back to the device key.
+        std::string d = getDefaultIdentityId();
+        return isKeycardId(d) ? std::string("device") : d;
     }
     json identityForContainer(const std::string& c) { return metaFor(identityIdForContainer(c)); }
 
