@@ -114,6 +114,9 @@ private:
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers
     loamid::IdentityStore* m_idStore = nullptr; // loam ADR 0004 identity service (lazy-init; new/delete in .cpp)
     bool m_built = false, m_started = false, m_forceMesh = false;
+    // Peerless watchdog: peer-exchange can't recover from 0 peers (no one to ask), so if the node was
+    // connected and stays at 0 peers for a sustained window, re-dial the entryNodes (bearer reconnect).
+    int m_zeroPeerStreak = 0; bool m_everConnected = false; long long m_lastReconnectMs = 0;
     std::string m_senderId = "loam-core";
     std::string m_mode = "Core";     // delivery bearer node mode (Core|Edge)
     std::string m_status = "Starting...";

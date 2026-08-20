@@ -2,6 +2,7 @@
 // modules().delivery_module.* (where the generated type is complete), funnels receives
 // through the MultiBearer dedup into the `received` event, and polls delivery metrics.
 #include <cctype>
+#include <chrono>
 #include "loam_core_impl.h"
 #include "logos_sdk.h"          // umbrella: complete LogosModules + LogosMap (nlohmann::json)
 #include "delivery_bearer.hpp"  // DeliveryBearer<LogosMap> (needs LogosMap → after logos_sdk.h)
@@ -49,6 +50,9 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     };
     ops.start = [this](DB::Cb cb) {
         modules().delivery_module.startAsync([cb](StdLogosResult r) { cb(r.success, r.error); });
+    };
+    ops.stop = [this](DB::Cb cb) {
+        modules().delivery_module.stopAsync([cb](StdLogosResult r) { cb(r.success, r.error); });
     };
     ops.subscribe = [this](const std::string& t, DB::Cb cb) {
         modules().delivery_module.subscribeAsync(t, [cb](StdLogosResult r) { cb(r.success, r.error); });
@@ -225,6 +229,20 @@ void LoamCoreImpl::refreshMetrics() {
             }
         }
         if (peers >= 0) { m_delivery->setPeers(peers); m_bearers.overallPeers = peers; }
+        // Peerless watchdog. Peer-exchange keeps peers healthy while connected but cannot bootstrap from
+        // 0 (the PX loop asks an existing peer — none, when peerless). So if the node was connected and
+        // then sits at 0 peers for ~30s (10 polls @3s), re-dial the entryNodes via the bearer reconnect.
+        // Cooldown 45s so a genuinely-down fleet doesn't cause a restart storm.
+        if (peers > 0) { m_everConnected = true; m_zeroPeerStreak = 0; }
+        else if (peers == 0 && m_everConnected && ++m_zeroPeerStreak >= 10) {
+            long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            if (now - m_lastReconnectMs > 45000) {
+                m_lastReconnectMs = now; m_zeroPeerStreak = 0;
+                fprintf(stderr, "loam: node peerless ~30s → re-dialing entryNodes (PX can't recover from 0)\n"); fflush(stderr);
+                if (m_delivery) m_delivery->reconnect();
+            }
+        }
         metricsChanged(m_bearers.metricsJson());
     });
 }

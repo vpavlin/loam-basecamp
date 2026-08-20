@@ -6,6 +6,7 @@
 // (nlohmann::json, a complete SDK header); the generated delivery_module type arrives via
 // the `Ops` std::functions built in the .cpp. See ADR 0015 + basecamp/README.md.
 #pragma once
+#include <set>
 #include "multibearer.hpp"
 #include <string>
 #include <vector>
@@ -25,6 +26,7 @@ public:
     struct Ops {
         std::function<void(const std::string &cfgJson, Cb)> createNode;
         std::function<void(Cb)> start;
+        std::function<void(Cb)> stop;   // delivery_module.stop — used by reconnect() to re-dial
         std::function<void(const std::string &contentTopic, Cb)> subscribe;
         std::function<void(const std::string &channelId, const std::string &contentTopic,
                            const std::string &senderId, Cb)> channelCreate;
@@ -55,7 +57,7 @@ public:
     std::function<void()> onReady;
 
     void start() override {
-        if (m_nodeReady || m_starting) return;
+        if (m_nodeReady || m_starting || m_reconnecting) return;
         m_starting = true;
 
         auto toWire = [](const LogosMap &v) -> std::string {
@@ -106,8 +108,32 @@ public:
     }
 
     void join(const std::string &topic) override {
+        m_allTopics.insert(topic);   // remembered so reconnect() can re-join after a node restart
         if (!m_nodeReady) { m_pendingTopics.push_back(topic); return; }
         doJoin(topic);
+    }
+
+    // The node lost all peers and won't re-dial itself (no discovery). Restart it and re-join every
+    // topic: stop → start (re-dials entryNodes) → doJoin all. Receive handlers were registered on the
+    // module (not the node), so they survive; SDS channels are rebuilt by the re-channelCreate in doJoin.
+    void reconnect() override {
+        if (!m_nodeReady || m_reconnecting) return;
+        m_reconnecting = true;
+        fprintf(stderr, "loam delivery: node peerless — reconnecting (stop→start→rejoin %zu topics)\n", m_allTopics.size());
+        fflush(stderr);
+        auto doStart = [this]() {
+            if (!m_ops.start) { m_reconnecting = false; return; }
+            m_ops.start([this](bool ok, const std::string &err) {
+                m_reconnecting = false;
+                if (!ok) { fprintf(stderr, "loam reconnect start err: %s\n", err.c_str()); return; }
+                m_nodeReady = true;
+                for (const auto &t : m_allTopics) doJoin(t);
+                if (onReady) onReady();
+            });
+        };
+        m_nodeReady = false;
+        if (m_ops.stop) m_ops.stop([doStart](bool, const std::string &) { doStart(); });
+        else doStart();
     }
 
     void send(const std::string &topic, const std::string &sealedBytes) override {
@@ -157,10 +183,11 @@ private:
     }
 
     Ops m_ops; Config m_cfg; Delay m_delay;
-    bool m_nodeReady = false, m_starting = false;
+    bool m_nodeReady = false, m_starting = false, m_reconnecting = false;
     int m_sendRepr = 0;      // 0 unprobed, 1 byte array, 2 string
     long m_peers = -1;
     std::vector<std::string> m_pendingTopics;
+    std::set<std::string> m_allTopics;   // every topic ever joined — re-joined on reconnect()
 };
 
 } // namespace loam

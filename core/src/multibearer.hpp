@@ -83,6 +83,9 @@ public:
     virtual bool ready() const = 0;
     // Set a peer count from an external poll (delivery); no-op for bearers that don't track it.
     virtual void setPeers(long) {}
+    // Re-establish the node's connections when it has silently gone peerless (no built-in discovery
+    // re-dials on its own). Default no-op; the delivery bearer stop→start→rejoins.
+    virtual void reconnect() {}
     // A JSON object: {"name","enabled","priority","ready","peers","rx","tx", …}
     virtual std::string metricsJson() const = 0;
 protected:
