@@ -74,13 +74,26 @@ public:
             std::string enc = toWire(payload);
             if (enc.empty() && payload.is_object() && payload.contains("payload")) enc = toWire(payload["payload"]);
             if (enc.empty()) return;
-            const std::string sealed = b64::decode(enc);   // one decode; the app peels the last layer
-            // Raw relay (onMessage) also fires for the shard's SDS-framed relay traffic — a string that
-            // isn't our base64 payload, so b64::decode yields nothing. Drop it: forwarding empty frames
-            // both delivers garbage AND floods `received` (a QRO event storm that wedges the headless hub).
+            std::string sealed = b64::decode(enc);   // one decode; the app peels the last layer
+            std::string snd = sender;
+            // Channel (SDS) traffic arrives here as raw `message_received` too: its payload is the
+            // SDS Message protobuf, NOT our base64 (so the direct b64::decode above is empty). The
+            // headless delivery build never surfaces `channel_message_received`, so peeling the raw
+            // SDS copy is the ONLY receive path for a peer on channels (e.g. the phone via the shared
+            // Loam node). SDS Message layout (confirmed on-wire): field 5 = base64 content (our sealed
+            // payload), field 7 = senderId. Only OUR subscribed content topic reaches this handler, so
+            // every SDS-framed frame here is our own channel traffic — safe to peel.
+            if (sealed.empty()) {
+                const std::string content = sdsField(enc, 5);
+                if (!content.empty()) sealed = b64::decode(content);
+                const std::string sid = sdsField(enc, 7);
+                if (!sid.empty()) snd = sid;
+            }
+            // Still nothing? Genuine foreign/undecodable relay noise — drop it. Forwarding empty
+            // frames both delivers garbage AND floods `received` (a QRO event storm that wedges the hub).
             if (sealed.empty()) return;
             ++m_rx;
-            if (onFrame) onFrame(topic, sender, sealed, ts);
+            if (onFrame) onFrame(topic, snd, sealed, ts);
         };
         // Register receive handlers BEFORE createNode (the position a GUI host receives with).
         if (m_ops.onMessage)        m_ops.onMessage(handle);
@@ -168,6 +181,29 @@ public:
 
 private:
     static Cb noop() { return [](bool, const std::string &) {}; }
+    // Extract one length-delimited (wire-type 2) field's bytes from a protobuf buffer.
+    // A minimal, tolerant varint walk over unknown fields — used to peel the SDS Message
+    // wrapper (see handle()): returns "" if the field is absent or the buffer is malformed.
+    static std::string sdsField(const std::string &b, int want) {
+        size_t i = 0, n = b.size();
+        auto rv = [&](uint64_t &out) -> bool {
+            uint64_t r = 0; int s = 0;
+            while (i < n) { unsigned char x = (unsigned char)b[i++]; r |= (uint64_t)(x & 0x7f) << s;
+                if (!(x & 0x80)) { out = r; return true; } s += 7; if (s > 63) return false; }
+            return false;
+        };
+        while (i < n) {
+            uint64_t tag; if (!rv(tag)) break;
+            int f = (int)(tag >> 3), wt = (int)(tag & 7);
+            if (wt == 2) { uint64_t ln; if (!rv(ln)) break; if (i + ln > n) break;
+                if (f == want) return b.substr(i, (size_t)ln); i += (size_t)ln; }
+            else if (wt == 0) { uint64_t v; if (!rv(v)) break; }
+            else if (wt == 5) { if (i + 4 > n) break; i += 4; }
+            else if (wt == 1) { if (i + 8 > n) break; i += 8; }
+            else break;
+        }
+        return std::string();
+    }
     static LogosMap bytesPayload(const std::string &s) {
         LogosMap a = LogosMap::array();
         for (unsigned char c : s) a.push_back((unsigned)c);
