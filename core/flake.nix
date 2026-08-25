@@ -6,7 +6,7 @@
     # (the released channel/SDS API — supersedes the old feat-add-channel-api-support branch).
     # delivery follows OUR module-builder so loam_core and every app that depends on it build
     # against ONE SDK ABI (avoids IPC skew). The apps must be bumped to match this baseline.
-    delivery_module.url = "github:logos-co/logos-delivery-module/v0.2.0";
+    delivery_module.url = "path:/home/vpavlin/kym-hub/sds-build/dm-channels";
     logos-module-builder.url = "github:logos-co/logos-module-builder/0.2.6";
     delivery_module.inputs.logos-module-builder.follows = "logos-module-builder";
     # ble_mesh is a sibling module in this monorepo (loam-basecamp/ble_mesh). loam_core fans
