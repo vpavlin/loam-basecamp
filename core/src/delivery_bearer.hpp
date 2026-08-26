@@ -74,26 +74,34 @@ public:
             std::string enc = toWire(payload);
             if (enc.empty() && payload.is_object() && payload.contains("payload")) enc = toWire(payload["payload"]);
             if (enc.empty()) return;
-            std::string sealed = b64::decode(enc);   // one decode; the app peels the last layer
-            std::string snd = sender;
-            // Channel (SDS) traffic arrives here as raw `message_received` too: its payload is the
-            // SDS Message protobuf, NOT our base64 (so the direct b64::decode above is empty). The
-            // headless delivery build never surfaces `channel_message_received`, so peeling the raw
-            // SDS copy is the ONLY receive path for a peer on channels (e.g. the phone via the shared
-            // Loam node). SDS Message layout (confirmed on-wire): field 5 = base64 content (our sealed
-            // payload), field 7 = senderId. Only OUR subscribed content topic reaches this handler, so
-            // every SDS-framed frame here is our own channel traffic — safe to peel.
-            if (sealed.empty()) {
-                const std::string content = sdsField(enc, 5);
-                if (!content.empty()) sealed = b64::decode(content);
-                const std::string sid = sdsField(enc, 7);
-                if (!sid.empty()) snd = sid;
+            std::string sealed, snd = sender, tpc = topic;
+            // Both delivery receive events (message_received AND channel_message_received) hand us the
+            // whole SDS Message protobuf as the payload (with the no-op Encrypt provider, the WakuMessage
+            // payload == the SDS proto verbatim). SDS layout (source: logos-delivery sds/protobuf.nim):
+            //   f1 messageId (keccak hex), f4 channelId (== our content topic), f5 content (the RAW app
+            //   bytes — NOT base64), f7 original senderId.
+            // We reconstruct EVERYTHING from the frame itself, because the event's own topic/sender args
+            // are unreliable across the two event shapes (message_received puts the messageHash where
+            // channel_message_received puts the channelId). So: derive the content topic from f4, the
+            // payload from f5 (forwarded RAW — qaku_core peels the base64 depth, trying single AND
+            // double; b64-decoding f5 here is the bug that silently dropped every frame), the sender
+            // from f7. A frame is "ours" when f5 is present and f4 looks like a Waku content topic.
+            const std::string f4 = sdsField(enc, 4);
+            const std::string f5 = sdsField(enc, 5);
+            const bool isSds = !f5.empty() && !f4.empty() && f4.rfind("/", 0) == 0;
+            if (isSds) {
+                tpc = f4;                                      // authoritative content topic
+                sealed = f5;                                   // RAW field-5 content; app peels b64
+                const std::string s7 = sdsField(enc, 7);
+                if (!s7.empty()) snd = s7;
+            } else {
+                sealed = b64::decode(enc);                     // a non-SDS / already-peeled payload
             }
-            // Still nothing? Genuine foreign/undecodable relay noise — drop it. Forwarding empty
+            // Nothing usable? Genuine foreign/undecodable relay noise — drop it. Forwarding empty
             // frames both delivers garbage AND floods `received` (a QRO event storm that wedges the hub).
             if (sealed.empty()) return;
             ++m_rx;
-            if (onFrame) onFrame(topic, snd, sealed, ts);
+            if (onFrame) onFrame(tpc, snd, sealed, ts);
         };
         m_handle = handle;   // stored so we can RE-subscribe once the delivery host is listening (below)
         // Register receive handlers BEFORE createNode (the position a GUI host receives with).

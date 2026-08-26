@@ -8,11 +8,11 @@
       },
       "locked": {
         "dir": "ble_mesh",
-        "lastModified": 1786809912,
-        "narHash": "sha256-8AHbWbeu9YzARhucHelBfaXjF8mwhOplRgBY8nYPo7k=",
+        "lastModified": 1787655595,
+        "narHash": "sha256-iT8dPJ4HuDeYos5lMaV1t6RXXrNjm/PEwhGI52TDehw=",
         "owner": "vpavlin",
         "repo": "loam-basecamp",
-        "rev": "19002e5a56f67c512984e49e90ec2bb7b5bc26c8",
+        "rev": "34393160eed88037d45ffb721cf2311717bd1c62",
         "type": "github"
       },
       "original": {
@@ -288,8 +288,8 @@
         "nix-bundle-lgx": "nix-bundle-lgx"
       },
       "locked": {
-        "lastModified": 1784909306,
-        "narHash": "sha256-xCYrvWnHhXjMhZ5VCnVWLeJUCDP9do6V/mXd3A+mocY=",
+        "lastModified": 1787679414,
+        "narHash": "sha256-ZmFgq8iPM8fgPTsSUBq6BE9lYGUWwM5YRLJoeJP/hYs=",
         "path": "/home/vpavlin/kym-hub/sds-build/dm-channels",
         "type": "path"
       },

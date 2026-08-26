@@ -66,18 +66,26 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     ops.sendRaw = [this](const std::string& t, const LogosMap& p, DB::Cb cb) {
         modules().delivery_module.sendAsync(t, p, [cb](StdLogosResult r) { cb(r.success, r.error); });
     };
-    ops.onMessage = [this](DB::RecvCb rcb) {
-        modules().delivery_module.onMessageReceived(
-            [rcb](const std::string&, const std::string& topic, const LogosMap& payload, int64_t ts) {
-                rcb(topic, "", payload, ts);
-            });
+    // RAW subscribe (see loam_core_impl.h): the generated onMessageReceived/onChannelMessageReceived
+    // run logos::jsonToBytes on the payload, which yields EMPTY unless it is a {"_bytes":…} object —
+    // but the delivery emits a base64 string (channel) / byte array (raw), so the binding zeroed every
+    // payload. We take _a.at(2) untouched (a LogosMap) and let the bearer's toWire peel it. THIS is the
+    // real "phone→hub receives nothing" fix — the SDS peel and the subscription timing were downstream.
+    if (!m_rawDelivery) m_rawDelivery = std::make_unique<logos::LpClient>("delivery_module", "loam_core");
+    auto rawEvent = [this](const char* evt, bool isChannel, DB::RecvCb rcb) {
+        auto sub = m_rawDelivery->subscribe(evt, [rcb, isChannel](nlohmann::json a) {
+            if (!a.is_array() || a.size() < 4) return;
+            // messageReceived:        [messageHash, contentTopic, payload, ts]
+            // channelMessageReceived: [channelId,   senderId,     payload, ts]
+            const std::string arg0 = a.at(0).is_string() ? a.at(0).get<std::string>() : std::string();
+            const std::string snd  = (isChannel && a.at(1).is_string()) ? a.at(1).get<std::string>() : std::string();
+            const int64_t ts       = a.at(3).is_number() ? (int64_t)a.at(3).get<double>() : 0;
+            rcb(arg0, snd, a.at(2), ts);   // a.at(2): raw payload JSON — bearer's toWire handles all shapes
+        });
+        if (sub.valid()) m_rawSubs.push_back(std::move(sub));
     };
-    ops.onChannelMessage = [this](DB::RecvCb rcb) {
-        modules().delivery_module.onChannelMessageReceived(
-            [rcb](const std::string& channelId, const std::string& sender, const LogosMap& payload, int64_t ts) {
-                rcb(channelId, sender, payload, ts);
-            });
-    };
+    ops.onMessage        = [this, rawEvent](DB::RecvCb rcb) { rawEvent("messageReceived", false, rcb); };
+    ops.onChannelMessage = [this, rawEvent](DB::RecvCb rcb) { rawEvent("channelMessageReceived", true, rcb); };
 
     DB::Config cfg;
     cfg.deviceId = m_senderId;

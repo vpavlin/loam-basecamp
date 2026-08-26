@@ -9,6 +9,8 @@ class QTimer;
 struct KcPending;                            // a pending keycard sign/enrol op — defined in the .cpp
 namespace loamid { class IdentityStore; }   // loam ADR 0004 identity service — defined in loam_identity.hpp (.cpp only)
 #include "logos_module_context.h"   // LogosModuleContext base + logos_events: + modules()
+#include "logos_lp_client.h"         // logos::LpClient/LpSubscription — RAW delivery event subscribe
+#include <vector>
 #include "multibearer.hpp"          // IBearer + MultiBearer (std::string only, no LogosMap)
 // NOTE: the generated modules() type + LogosMap live in the umbrella "logos_sdk.h", which
 // is included only in the .cpp (it can't appear in this generator-read header). The delivery
@@ -112,6 +114,15 @@ private:
 
     loam::MultiBearer m_bearers;
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers
+    // RAW delivery event subscription. The generated delivery_module.onChannelMessageReceived /
+    // onMessageReceived wrappers pre-decode the payload with logos::jsonToBytes, which returns
+    // EMPTY for anything that is not a {"_bytes":"…"} object — but the delivery emits the payload
+    // as a base64 string (channel) or a byte array (raw). So the generated binding silently zeroed
+    // every received payload (the phone→hub "receives nothing" bug). We subscribe to the raw event
+    // ourselves and hand _a.at(2) (the untouched payload JSON) straight to the bearer, whose toWire
+    // already understands {"_bytes"} / string / array. Members outlive the subscription callbacks.
+    std::unique_ptr<logos::LpClient> m_rawDelivery;
+    std::vector<logos::LpSubscription> m_rawSubs;
     loamid::IdentityStore* m_idStore = nullptr; // loam ADR 0004 identity service (lazy-init; new/delete in .cpp)
     bool m_built = false, m_started = false, m_forceMesh = false;
     // Peerless watchdog: peer-exchange can't recover from 0 peers (no one to ask), so if the node was
