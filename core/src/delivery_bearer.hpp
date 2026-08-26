@@ -95,6 +95,7 @@ public:
             ++m_rx;
             if (onFrame) onFrame(topic, snd, sealed, ts);
         };
+        m_handle = handle;   // stored so we can RE-subscribe once the delivery host is listening (below)
         // Register receive handlers BEFORE createNode (the position a GUI host receives with).
         if (m_ops.onMessage)        m_ops.onMessage(handle);
         if (m_ops.onChannelMessage) m_ops.onChannelMessage(handle);
@@ -111,6 +112,14 @@ public:
                 m_ops.start([this](bool ok2, const std::string &err2) {
                     if (!ok2) { m_starting = false; fprintf(stderr, "loam delivery start err: %s\n", err2.c_str()); return; }
                     m_nodeReady = true; m_starting = false;
+                    // RE-SUBSCRIBE receive handlers now that the delivery host is LISTENING.
+                    // The generated event-subscription (cpp-sdk pre-#134 9d508292e) does a blocking
+                    // ensureReplica() at the FIRST subscribe — which runs before the delivery host
+                    // calls listen() — and fails PERMANENTLY + silently, so `messageReceived` never
+                    // delivers and rx stays 0. Subscribing again here, after the node is up, actually
+                    // lands the callback. Remove once we're on a module-builder that carries #134.
+                    if (m_ops.onMessage)        m_ops.onMessage(m_handle);
+                    if (m_ops.onChannelMessage) m_ops.onChannelMessage(m_handle);
                     for (const auto &t : m_pendingTopics) doJoin(t);   // (re)join topics requested before ready
                     m_pendingTopics.clear();
                     if (onReady) onReady();                            // → loam_core emits "Connected"
@@ -224,6 +233,7 @@ private:
     long m_peers = -1;
     std::vector<std::string> m_pendingTopics;
     std::set<std::string> m_allTopics;   // every topic ever joined — re-joined on reconnect()
+    RecvCb m_handle;   // the receive callback; re-subscribed after the node is ready (cpp-sdk pre-#134 workaround)
 };
 
 } // namespace loam
