@@ -98,7 +98,12 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     // useChannels: true → SDS Reliable Channels (mobile parity, default); false → raw relay
     // (shipping kym's current wire). Keeps loam_core a drop-in — no silent mode flip.
     if (j.contains("useChannels") && j["useChannels"].is_boolean()) cfg.useChannels = j["useChannels"].get<bool>();
-    j.erase("hubMode"); j.erase("useChannels");                    // not delivery-node keys
+    // BLE mesh is OFF by default. It is an OPTIONAL second bearer, and wiring it into the
+    // fan-out + dedup receive path made the primary Waku delivery unreliable (intermittent
+    // drops). Waku is the reliable transport; only add the BLE bearer when a caller explicitly
+    // opts in with useBle:true. Default off == the single-Waku-bearer path from before BLE mesh.
+    const bool useBle = j.contains("useBle") && j["useBle"].is_boolean() && j["useBle"].get<bool>();
+    j.erase("hubMode"); j.erase("useChannels"); j.erase("useBle");  // not delivery-node keys
     if (!j.contains("mode"))   j["mode"]   = m_mode;               // default node mode
     if (!j.contains("preset")) j["preset"] = "logos.test";        // cluster-2 (ADR 0008)
     cfg.nodeCfgJson = j.dump();
@@ -111,21 +116,24 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     m_delivery = db.get();
     m_bearers.add(std::move(db));
 
-    // Second bearer: the ble_mesh module (flood-gossip over Bluetooth). The MultiBearer fans each
-    // write to it too and dedups its frames against the Waku copy by frameId. 0 peers until the
-    // ble_mesh Qt Bluetooth radio (Phase 3), so it's inert but present in metrics/control today.
-    loam::BleModuleBearer::Ops bops;
-    bops.start = [this] { modules().ble_mesh.startAsync([](std::string) {}); };
-    bops.flood = [this](const std::string& topic, const std::string& payloadB64) {
-      modules().ble_mesh.floodAsync(topic, payloadB64, [](std::string) {});
-    };
-    bops.onFrame = [this](loam::BleModuleBearer::FrameRecvCb cb) {
-      modules().ble_mesh.onFrameReceived(
-        [cb](const std::string& topic, const std::string& sender, const std::string& payloadB64, int64_t ts) {
-          cb(topic, sender, payloadB64, ts);
-        });
-    };
-    m_bearers.add(std::make_unique<loam::BleModuleBearer>(bops));
+    // Second bearer: the ble_mesh module (flood-gossip over Bluetooth). OFF unless useBle:true —
+    // see above. When enabled the MultiBearer fans each write to it too and dedups its frames
+    // against the Waku copy by frameId. Kept behind the flag so Waku-only delivery stays the
+    // reliable default and the BLE code is here for when the mesh work resumes.
+    if (useBle) {
+        loam::BleModuleBearer::Ops bops;
+        bops.start = [this] { modules().ble_mesh.startAsync([](std::string) {}); };
+        bops.flood = [this](const std::string& topic, const std::string& payloadB64) {
+          modules().ble_mesh.floodAsync(topic, payloadB64, [](std::string) {});
+        };
+        bops.onFrame = [this](loam::BleModuleBearer::FrameRecvCb cb) {
+          modules().ble_mesh.onFrameReceived(
+            [cb](const std::string& topic, const std::string& sender, const std::string& payloadB64, int64_t ts) {
+              cb(topic, sender, payloadB64, ts);
+            });
+        };
+        m_bearers.add(std::make_unique<loam::BleModuleBearer>(bops));
+    }
 
     m_built = true;
 }
