@@ -140,6 +140,16 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
 
 std::string LoamCoreImpl::start(std::string cfgJson) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    // Several apps share this node (qaku, kith, scala… each calls start()). A later caller must not
+    // reset the shared status to "Connecting..." and re-start already-running bearers: nothing would
+    // report ready again, so the status stuck at "Connecting..." for every app and the late app never
+    // saw the "Connected" it waits for (scala started after kith/qaku synced nothing until a restart).
+    // Re-announce the current state instead, so the late caller gets its signal.
+    if (m_started) {
+        if (m_delivery && m_delivery->ready()) setStatus("Connected");
+        else statusChanged(m_status);
+        return "";
+    }
     ensureBearers(cfgJson);
     m_started = true;
     setStatus("Connecting...");
