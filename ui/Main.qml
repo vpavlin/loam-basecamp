@@ -60,22 +60,22 @@ Item {
     // header + connection
     RowLayout {
       Layout.fillWidth: true
-      LogosText { text: "Loam"; font.pixelSize: Theme.typography.sizeXLarge; font.bold: true; color: Theme.palette.text }
+      LogosText { textFormat: Text.PlainText; text: "Loam"; font.pixelSize: Theme.typography.sizeXLarge; font.bold: true; color: Theme.palette.text }
       Item { Layout.fillWidth: true }
       Rectangle {
         width: 10; height: 10; radius: 5; Layout.alignment: Qt.AlignVCenter
         color: root.metrics.connected ? Theme.palette.success : Theme.palette.warning
       }
-      LogosText {
+      LogosText { textFormat: Text.PlainText;
         text: (root.metrics.connected ? "connected" : "connecting…") +
               (root.metrics.peers >= 0 ? "  ·  " + root.metrics.peers + " peers" : "")
         color: Theme.palette.textTertiary
       }
     }
-    LogosText { text: root.statusText; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall }
+    LogosText { textFormat: Text.PlainText; text: root.statusText; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall }
 
     // bearers
-    LogosText { text: "BEARERS"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.topMargin: Theme.spacing.small }
+    LogosText { textFormat: Text.PlainText; text: "BEARERS"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.topMargin: Theme.spacing.small }
     Repeater {
       model: root.metrics.bearers
       Rectangle {
@@ -94,8 +94,8 @@ Item {
               color: modelData.ready && modelData.peers > 0 ? Theme.palette.success
                    : modelData.ready ? Theme.palette.warning : Theme.palette.textTertiary
             }
-            LogosText { text: root.bearerInfo(modelData.name).label; font.bold: true; color: Theme.palette.text }
-            LogosText {
+            LogosText { textFormat: Text.PlainText; text: root.bearerInfo(modelData.name).label; font.bold: true; color: Theme.palette.text }
+            LogosText { textFormat: Text.PlainText;
               text: modelData.ready ? "ready" : "down"
               color: modelData.ready ? Theme.palette.success : Theme.palette.textTertiary
               font.pixelSize: Theme.typography.sizeSmall
@@ -106,11 +106,11 @@ Item {
               onClicked: root.setBearer(modelData.name, !modelData.enabled)
             }
           }
-          LogosText {
+          LogosText { textFormat: Text.PlainText;
             text: "peers " + modelData.peers + "   rx " + modelData.rx + "   tx " + modelData.tx + "   prio " + modelData.priority
             color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall
           }
-          LogosText {
+          LogosText { textFormat: Text.PlainText;
             text: root.bearerInfo(modelData.name).why
             visible: text.length > 0
             color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall
@@ -121,7 +121,7 @@ Item {
     }
 
     // controls
-    LogosText { text: "CONTROLS"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.topMargin: Theme.spacing.small }
+    LogosText { textFormat: Text.PlainText; text: "CONTROLS"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.topMargin: Theme.spacing.small }
     RowLayout {
       spacing: Theme.spacing.small
       LogosButton { text: "Force mesh"; onClicked: root.setForceMesh(true) }
@@ -129,14 +129,14 @@ Item {
     }
     RowLayout {
       spacing: Theme.spacing.small
-      LogosText { text: "Node mode:"; color: Theme.palette.textTertiary; Layout.alignment: Qt.AlignVCenter }
+      LogosText { textFormat: Text.PlainText; text: "Node mode:"; color: Theme.palette.textTertiary; Layout.alignment: Qt.AlignVCenter }
       LogosButton { text: "Core"; onClicked: root.setMode("Core") }
       LogosButton { text: "Edge"; onClicked: root.setMode("Edge") }
-      LogosText { text: root.mode + " (applies on restart)"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.alignment: Qt.AlignVCenter }
+      LogosText { textFormat: Text.PlainText; text: root.mode + " (applies on restart)"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.alignment: Qt.AlignVCenter }
     }
 
     Item { Layout.fillHeight: true }
-    LogosText {
+    LogosText { textFormat: Text.PlainText;
       text: "One shared node per phone. loam_core fans each sealed write to every bearer and dedups by frame id, so a write over Waku and the same over BLE fold to one."
       color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall
       wrapMode: Text.WordWrap; Layout.fillWidth: true
