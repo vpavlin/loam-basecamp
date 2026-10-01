@@ -1,7 +1,8 @@
 # Build Basecamp modules for macOS (Apple Silicon) on a GitHub macOS runner, so the Linux
 # packages we publish can be merged into multi-platform .lgx files (`lgx merge`).
 #
-# Each line of `modules` is `name=flakeref` (pin commits for reproducible packages). One module
+# Each line of `modules` is `name=flakeref [extra nix args]` (pin commits for reproducible packages;
+# extra args e.g. `--override-input keycard github:…` to build against a patched dependency). One module
 # failing doesn't stop the rest: the summary says OK/FAILED per module, every build log's tail is
 # uploaded, and the built .lgx files land in the `macos-lgx` artifact.
 #
@@ -37,21 +38,23 @@ jobs:
           if [ -z "$MODULES" ]; then MODULES=$(cat <<'LIST'
           delivery_module=github:vpavlin/logos-delivery-module/7d93aeb9382ffdf2025e3d7835427420fc23cbb2
           storage_module=github:logos-co/logos-storage-module/bcc29f05e2a7b4a2d215d09640aaa7436359906b
-          keycard=github:xAlisher/keycard-basecamp/7865e3fa189c31c81ca40bd434e745740e1114fe
+          keycard=github:vpavlin/keycard-basecamp/27c0cdf3d9d7967c34a65386e4ecaa93803646fb
           keycard-ui=github:vpavlin/keycard-basecamp/a3f87be389d5ba977651ce401d8c6e57fd306f5e?dir=keycard-ui
           ble_mesh=github:vpavlin/loam-basecamp/fc8ec6d52c9562ee197158d31b54597d2e6bccc8?dir=ble_mesh
-          loam_core=github:vpavlin/loam-basecamp/fc8ec6d52c9562ee197158d31b54597d2e6bccc8?dir=core
+          loam_core=github:vpavlin/loam-basecamp/fc8ec6d52c9562ee197158d31b54597d2e6bccc8?dir=core --override-input keycard github:vpavlin/keycard-basecamp/27c0cdf3d9d7967c34a65386e4ecaa93803646fb
           scala=github:vpavlin/scala/541bde522cde9b324f926fe4e7e7718b419beca5
           scala_ui=github:vpavlin/scala/541bde522cde9b324f926fe4e7e7718b419beca5?dir=scala-ui
           LIST
           ); fi
           mkdir -p out logs; : > out/summary.txt
-          while IFS='=' read -r name ref; do
-            name=$(echo "$name" | xargs); ref=$(echo "$ref" | xargs)
+          while IFS='=' read -r name rest; do
+            # rest = "<flakeref> [extra nix args, e.g. --override-input keycard github:…]"
+            name=$(echo "$name" | xargs); ref=$(echo "$rest" | awk '{print $1}'); extra=$(echo "$rest" | awk '{$1=""; print}' | xargs)
             [ -n "$name" ] || continue
             echo "::group::$name ($ref)"
             start=$(date +%s)
-            if nix build --accept-flake-config "${ref}#lgx-portable" -o "res-$name" > "logs/$name.log" 2>&1; then
+            # shellcheck disable=SC2086
+            if nix build --accept-flake-config "${ref}#lgx-portable" $extra -o "res-$name" > "logs/$name.log" 2>&1; then
               cp res-$name/*.lgx "out/$name.lgx"
               echo "$name OK ($(( $(date +%s) - start ))s)" | tee -a out/summary.txt
             else
