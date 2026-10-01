@@ -14,12 +14,26 @@ Item {
   property string mode: "Core"
 
   // ── bridge ────────────────────────────────────────────────────────────────
-  function callCore(method, args) {
-    if (typeof logos === "undefined" || !logos.callModule) return "";
-    var r = logos.callModule("loam_core", method, args || []);
-    // returns may come back double-encoded through the bridge — peel up to twice
-    for (var i = 0; i < 2 && typeof r === "string"; i++) { var t = r.trim(); if (t.charAt(0) !== '"') break; try { r = JSON.parse(r); } catch (e) { break; } }
-    return String(r);
+  // No blocking cross-module calls in a view: callModuleAsync when the host has it, else the old
+  // callModule deferred to the next event-loop turn. cb gets the result, peeled of the bridge's
+  // extra JSON-quoting (up to twice).
+  function callCore(method, args, cb) {
+    var a = args || [];
+    var deliver = function (r) {
+      for (var i = 0; i < 2 && typeof r === "string"; i++) { var t = r.trim(); if (t.charAt(0) !== '"') break; try { r = JSON.parse(r); } catch (e) { break; } }
+      if (cb) { try { cb(r === undefined || r === null ? "" : String(r)); } catch (e2) { console.warn("loam view: callback error: " + e2); } }
+    };
+    if (typeof logos === "undefined" || logos === null) { Qt.callLater(function () { deliver(""); }); return; }
+    if (typeof logos.callModuleAsync === "function") {
+      try { logos.callModuleAsync("loam_core", method, a, deliver, 20000); }
+      catch (e) { Qt.callLater(function () { deliver(""); }); }
+      return;
+    }
+    Qt.callLater(function () {
+      var r = "";
+      try { r = (typeof logos.callModule === "function") ? logos.callModule("loam_core", method, a) : ""; } catch (e) {}
+      deliver(r);
+    });
   }
   function parseObj(raw) {
     var s = String(raw || "").trim();
@@ -27,10 +41,15 @@ Item {
     if (s.charAt(0) !== "{") return null;
     try { return JSON.parse(s); } catch (e) { return null; }
   }
+  property bool refreshBusy: false
   function refresh() {
-    var o = parseObj(callCore("metricsJson", []));
-    if (o && o.bearers !== undefined) root.metrics = o;
-    root.statusText = callCore("status", []);
+    if (root.refreshBusy) return;          // single-flight: a slow core can't pile 2.5 s polls up
+    root.refreshBusy = true;
+    callCore("metricsJson", [], function (raw) {
+      var o = parseObj(raw);
+      if (o && o.bearers !== undefined) root.metrics = o;
+      callCore("status", [], function (st) { root.statusText = st; root.refreshBusy = false; });
+    });
   }
   // friendly name + a plain "when & why" per bearer — matches the mobile Loam app.
   function bearerInfo(name) {
@@ -42,12 +61,12 @@ Item {
       why: "Long-range, low-power radio — kilometres, off-grid. Apps don't change; it's just another pipe Loam fans writes across." };
     return { label: name, why: "" };
   }
-  function setBearer(name, on) { callCore("setBearerEnabled", [name, on ? "1" : "0"]); Qt.callLater(root.refresh); }
-  function setForceMesh(on)    { callCore("forceMesh", [on ? "1" : "0"]); Qt.callLater(root.refresh); }
+  function setBearer(name, on) { callCore("setBearerEnabled", [name, on ? "1" : "0"], function () { root.refresh(); }); }
+  function setForceMesh(on)    { callCore("forceMesh", [on ? "1" : "0"], function () { root.refresh(); }); }
   function setMode(m)          { root.mode = m; callCore("setNodeMode", [m]); }
 
   Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
-  Component.onCompleted: Qt.callLater(root.refresh)   // defer — a sync callModule during construction freezes the view
+  Component.onCompleted: Qt.callLater(root.refresh)
 
   // ── layout ──────────────────────────────────────────────────────────────
   Rectangle { anchors.fill: parent; color: Theme.palette.background }
