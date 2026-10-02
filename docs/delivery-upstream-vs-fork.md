@@ -42,3 +42,11 @@ build target (only an iOS example) — the phones keep needing our patched libra
 5. Interop test old ↔ new nodes (same wire protocol expected).
 
 Related: loam-transport ADR 0018 (RLN), `docs/` of the platform builds workflow (`.github/workflows/macos-modules.yml`).
+
+## Incident 2026-10-02: Basecamp replaced our fork with upstream
+
+With both our repo and the official Logos repo added, Basecamp offers the highest `delivery_module` version
+across repos, so it "upgraded" our 0.1.4 fork to upstream 0.3.x. The node still connected, but no message
+reached loam_core (the `messageReceived` signature change, plus RLN on `logos.test`), so every app stopped
+syncing. Workaround: reinstall 0.1.4 from our repo and decline the update. This makes the migration
+above urgent; until then, our fork can be shadowed by upstream at any time.
