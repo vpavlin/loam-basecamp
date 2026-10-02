@@ -7,6 +7,7 @@
 // the `Ops` std::functions built in the .cpp. See ADR 0015 + basecamp/README.md.
 #pragma once
 #include <set>
+#include "segment_compat.hpp"
 #include "multibearer.hpp"
 #include <string>
 #include <vector>
@@ -91,7 +92,13 @@ public:
             const bool isSds = !f5.empty() && !f4.empty() && f4.rfind("/", 0) == 0;
             if (isSds) {
                 tpc = f4;                                      // authoritative content topic
-                sealed = f5;                                   // RAW field-5 content; app peels b64
+                // delivery >= 0.3.0 (lib v0.39) wraps the content in a LIP-243 SegmentMessage even when it
+                // fits one segment; 0.1.4 / the phones don't. Accept both (segment_compat.hpp).
+                sealed = loam::segcompat::unwrapSingleSegment(f5);   // RAW content; app peels b64
+                if (loam::segcompat::isSegmentWrapped(sealed)) {   // part of a multi-segment set (> 100 KiB)
+                    ++m_rxSegmented;                                 // reassembly not supported yet
+                    return;
+                }
                 const std::string s7 = sdsField(enc, 7);
                 if (!s7.empty()) snd = s7;
             } else {
@@ -192,7 +199,8 @@ public:
         o += ",\"ready\":" + std::string(m_nodeReady ? "true" : "false");
         o += ",\"peers\":" + std::to_string(m_peers);
         o += ",\"rx\":" + std::to_string((long long)m_rx);
-        o += ",\"tx\":" + std::to_string((long long)m_tx) + "}";
+        o += ",\"tx\":" + std::to_string((long long)m_tx);
+        o += ",\"rxSegmented\":" + std::to_string((long long)m_rxSegmented) + "}";
         return o;
     }
 
@@ -237,6 +245,7 @@ private:
 
     Ops m_ops; Config m_cfg; Delay m_delay;
     bool m_nodeReady = false, m_starting = false, m_reconnecting = false;
+    uint64_t m_rxSegmented = 0;   // frames that were part of a multi-segment set (dropped: no reassembly yet)
     int m_sendRepr = 0;      // 0 unprobed, 1 byte array, 2 string
     long m_peers = -1;
     std::vector<std::string> m_pendingTopics;

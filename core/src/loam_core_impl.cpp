@@ -75,11 +75,14 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     auto rawEvent = [this](const char* evt, bool isChannel, DB::RecvCb rcb) {
         auto sub = m_rawDelivery->subscribe(evt, [rcb, isChannel](nlohmann::json a) {
             if (!a.is_array() || a.size() < 4) return;
-            // messageReceived:        [messageHash, contentTopic, payload, ts]
+            // messageReceived:        [messageHash, contentTopic, payload, ts]          (delivery 0.1.x)
+            //                         [messageHash, contentTopic, payload, source, ts]  (delivery >= 0.3.0;
+            //                          source = "live" | "history")
             // channelMessageReceived: [channelId,   senderId,     payload, ts]
+            // The timestamp is the LAST argument in every shape.
             const std::string arg0 = a.at(0).is_string() ? a.at(0).get<std::string>() : std::string();
             const std::string snd  = (isChannel && a.at(1).is_string()) ? a.at(1).get<std::string>() : std::string();
-            const int64_t ts       = a.at(3).is_number() ? (int64_t)a.at(3).get<double>() : 0;
+            const int64_t ts       = a.back().is_number() ? (int64_t)a.back().get<double>() : 0;
             rcb(arg0, snd, a.at(2), ts);   // a.at(2): raw payload JSON — bearer's toWire handles all shapes
         });
         if (sub.valid()) m_rawSubs.push_back(std::move(sub));
