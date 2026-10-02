@@ -106,9 +106,35 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     // drops). Waku is the reliable transport; only add the BLE bearer when a caller explicitly
     // opts in with useBle:true. Default off == the single-Waku-bearer path from before BLE mesh.
     const bool useBle = j.contains("useBle") && j["useBle"].is_boolean() && j["useBle"].get<bool>();
-    j.erase("hubMode"); j.erase("useChannels"); j.erase("useBle");  // not delivery-node keys
+    // rln: false (default) joins the logos.test network WITHOUT RLN. Upstream delivery_module
+    // (>= 0.3.0) attaches RLN to the "logos.test" preset by name, and without a funded membership
+    // every send fails. The library's own logos.test preset has RLN off, so with rln:false we pass
+    // its network parameters explicitly instead of the preset name (same cluster, shards, entry
+    // nodes). rln:true uses the preset — and then needs the RLN modules + a membership.
+    const bool rln = j.contains("rln") && j["rln"].is_boolean() && j["rln"].get<bool>();
+    j.erase("hubMode"); j.erase("useChannels"); j.erase("useBle"); j.erase("rln");  // not delivery-node keys
     if (!j.contains("mode"))   j["mode"]   = m_mode;               // default node mode
-    if (!j.contains("preset")) j["preset"] = "logos.test";        // cluster-2 (ADR 0008)
+    const bool logosTest = !j.contains("preset") ||
+        (j["preset"].is_string() && j["preset"].get<std::string>() == "logos.test");
+    if (logosTest && rln) {
+        j["preset"] = "logos.test";                                // cluster-2 (ADR 0008) + RLN
+    } else if (logosTest) {
+        // Mirror of logos-delivery v0.39 networks_config.nim LogosTestConf (RLN off there).
+        j["preset"] = "";
+        if (!j.contains("clusterId"))          j["clusterId"] = 2;
+        if (!j.contains("numShardsInNetwork")) j["numShardsInNetwork"] = 8;
+        if (!j.contains("maxMessageSize"))     j["maxMessageSize"] = "150KiB";
+        if (!j.contains("discv5Discovery"))    j["discv5Discovery"] = true;
+        if (!j.contains("enableKadDiscovery")) j["enableKadDiscovery"] = true;
+        if (!j.contains("reliabilityEnabled")) j["reliabilityEnabled"] = true;
+        if (!j.contains("entryNodes")) j["entryNodes"] = LogosMap::array({
+            "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
+            "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
+            "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
+            "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7",
+            "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
+            "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV"});
+    }
     cfg.nodeCfgJson = j.dump();
 
     auto db = std::make_unique<DB>(ops, cfg);

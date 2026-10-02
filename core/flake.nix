@@ -2,26 +2,13 @@
   description = "loam_core — the Loam transport FACADE core module: a stable, bearer-agnostic API over delivery_module (and later ble_mesh / lora) with fan-out + dedup. ADR 0015.";
 
   inputs = {
-    # Released logos-core tooling (latest as of 2026-08): module-builder 0.2.6 + delivery v0.2.0
-    # (the released channel/SDS API — supersedes the old feat-add-channel-api-support branch).
-    # delivery follows OUR module-builder so loam_core and every app that depends on it build
-    # against ONE SDK ABI (avoids IPC skew). The apps must be bumped to match this baseline.
-    # Our Loam build of delivery_module (0.1.4 = upstream feat-add-channel-api-support @ 0fb3a74),
-    # published so this builds anywhere (CI, macOS) — previously a local path on the dev box.
-    delivery_module.url = "github:vpavlin/logos-delivery-module/loam-0.1.4";
-    logos-module-builder.url = "github:logos-co/logos-module-builder/0.2.6";
-    delivery_module.inputs.logos-module-builder.follows = "logos-module-builder";
-    # ble_mesh is a sibling module in this monorepo (loam-basecamp/ble_mesh). loam_core fans
-    # each sealed write to it too and funnels its frames into the same dedup'd receive stream.
-    ble_mesh.url = "github:vpavlin/loam-basecamp?dir=ble_mesh";
-    ble_mesh.inputs.logos-module-builder.follows = "logos-module-builder";
-    # keycard: Alisher's native smartcard module (PC/SC via keycard-qt). loam_core's
-    # identity service delegates signDigest for a keycard-kind identity to it. Declaring
-    # it makes keycard a HARD dependency of loam_core (Basecamp has no optional deps) —
-    # so every app on loam_core requires the keycard module present; it loads idle
-    # without a reader. See ADR 0004 (loam) / scala ADR 0016.
-    keycard.url = "github:xAlisher/keycard-basecamp";
-    keycard.inputs.logos-module-builder.follows = "logos-module-builder";
+    # port/0.3: builder 0.3.1 (Basecamp 0.3.x) + UPSTREAM delivery_module v0.3.0 — no more fork.
+    logos-module-builder.url = "github:logos-co/logos-module-builder/0.3.1";
+    delivery_module.url = "github:logos-co/logos-delivery-module/v0.3.0";
+    # ble_mesh: sibling module in this monorepo (pinned to the port/0.3 commit that ships it).
+    ble_mesh.url = "github:vpavlin/loam-basecamp/0521263563e4e48270d0449864396cd4900969cc?dir=ble_mesh";
+    # keycard: universal-interface port of Alisher's module (vpavlin/keycard-basecamp port/0.3).
+    keycard.url = "github:vpavlin/keycard-basecamp/5e89fdf6ad226d3b0710d057b840f19f6d0b80e7";
   };
 
   # mkLogosModule (not mkLogosQmlModule): a headless CORE module — no QML view. The
