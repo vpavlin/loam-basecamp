@@ -38,8 +38,11 @@ inline std::string encode(const std::string &in) {
     while (out.size() % 4) out.push_back('=');
     return out;
 }
+// Accepts standard AND URL-safe base64 (delivery >= 0.3.0 hands payloads as {"_bytes": <url-safe>}).
+// The old decoder stopped at the first '-' or '_' and silently returned a TRUNCATED frame.
 inline std::string decode(const std::string &in) {
     std::vector<int> T(256, -1); for (int i = 0; i < 64; i++) T[(unsigned char)tbl()[i]] = i;
+    T[(unsigned char)'-'] = 62; T[(unsigned char)'_'] = 63;
     std::string out; int val = 0, bits = -8;
     for (unsigned char c : in) { if (c == '=' || T[c] == -1) break;
         val = (val << 6) + T[c]; bits += 6;

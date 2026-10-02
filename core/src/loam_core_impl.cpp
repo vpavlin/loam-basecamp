@@ -87,6 +87,16 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
         });
         if (sub.valid()) m_rawSubs.push_back(std::move(sub));
     };
+    // nodeStarted(success, message, ts) — the real outcome of start() on delivery >= 0.3.0.
+    ops.onNodeStarted = [this](std::function<void(bool, const std::string&)> cb) {
+        auto sub = m_rawDelivery->subscribe("nodeStarted", [cb](nlohmann::json a) {
+            if (!a.is_array() || a.empty()) return;
+            const bool ok = a.at(0).is_boolean() ? a.at(0).get<bool>() : false;
+            const std::string msg = (a.size() > 1 && a.at(1).is_string()) ? a.at(1).get<std::string>() : std::string();
+            cb(ok, msg);
+        });
+        if (sub.valid()) m_rawSubs.push_back(std::move(sub));
+    };
     ops.onMessage        = [this, rawEvent](DB::RecvCb rcb) { rawEvent("messageReceived", false, rcb); };
     ops.onChannelMessage = [this, rawEvent](DB::RecvCb rcb) { rawEvent("channelMessageReceived", true, rcb); };
 
@@ -114,6 +124,11 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     const bool rln = j.contains("rln") && j["rln"].is_boolean() && j["rln"].get<bool>();
     j.erase("hubMode"); j.erase("useChannels"); j.erase("useBle"); j.erase("rln");  // not delivery-node keys
     if (!j.contains("mode"))   j["mode"]   = m_mode;               // default node mode
+    // Random ports unless the app pins them. The flat config defaults to a FIXED tcp 60000 and
+    // discv5 udp 9000 (QUIC follows the TCP port), so a second node on the machine — another app's,
+    // a hub — failed START_NODE with "Address already in use".
+    if (!j.contains("tcpPort"))       j["tcpPort"] = 0;
+    if (!j.contains("discv5UdpPort")) j["discv5UdpPort"] = 0;
     const bool logosTest = !j.contains("preset") ||
         (j["preset"].is_string() && j["preset"].get<std::string>() == "logos.test");
     if (logosTest && rln) {
@@ -142,6 +157,7 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     // early (async node bringup), so apps learn the node is up by subscribing to statusChanged,
     // not from the start() callback.
     db->onReady = [this] { setStatus("Connected"); };
+    db->onError = [this](const std::string& msg) { setStatus("Delivery error: " + msg); };
     m_delivery = db.get();
     m_bearers.add(std::move(db));
 
