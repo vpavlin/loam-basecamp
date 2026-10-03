@@ -123,6 +123,21 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     // nodes). rln:true uses the preset — and then needs the RLN modules + a membership.
     const bool rln = j.contains("rln") && j["rln"].is_boolean() && j["rln"].get<bool>();
     j.erase("hubMode"); j.erase("useChannels"); j.erase("useBle"); j.erase("rln");  // not delivery-node keys
+    // Apps written for delivery 0.2.x pass the LAYERED shape ({preset, messagingOverrides:{...}}).
+    // Upstream delivery switches to the legacy FLAT parser as soon as any other top-level key is
+    // present — and we add some below — where "messagingOverrides" is an unknown key (an error).
+    // So flatten it: dash-case messaging keys become the flat (camelCase) node options.
+    if (j.contains("messagingOverrides") && j["messagingOverrides"].is_object()) {
+        for (auto it = j["messagingOverrides"].begin(); it != j["messagingOverrides"].end(); ++it) {
+            std::string k, key = it.key();
+            for (size_t i = 0; i < key.size(); ++i) {
+                if (key[i] == '-' && i + 1 < key.size()) { k.push_back((char)std::toupper((unsigned char)key[++i])); }
+                else k.push_back(key[i]);
+            }
+            if (!j.contains(k)) j[k] = it.value();
+        }
+        j.erase("messagingOverrides");
+    }
     if (!j.contains("mode"))   j["mode"]   = m_mode;               // default node mode
     // Random ports unless the app pins them. The flat config defaults to a FIXED tcp 60000 and
     // discv5 udp 9000 (QUIC follows the TCP port), so a second node on the machine — another app's,
