@@ -80,7 +80,12 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
             //                          source = "live" | "history")
             // channelMessageReceived: [channelId,   senderId,     payload, ts]
             // The timestamp is the LAST argument in every shape.
-            const std::string arg0 = a.at(0).is_string() ? a.at(0).get<std::string>() : std::string();
+            // The bearer uses this as the TOPIC for frames that are not SDS-framed (plain relay, e.g. kym
+            // with useChannels:false): the channelId for a channel event, but the CONTENT TOPIC — not the
+            // message hash in arg 0 — for messageReceived. (Passing the hash made kym drop every
+            // plain-relay frame as "not a topic we hold".)
+            const size_t topicArg  = isChannel ? 0 : 1;
+            const std::string arg0 = a.at(topicArg).is_string() ? a.at(topicArg).get<std::string>() : std::string();
             const std::string snd  = (isChannel && a.at(1).is_string()) ? a.at(1).get<std::string>() : std::string();
             const int64_t ts       = a.back().is_number() ? (int64_t)a.back().get<double>() : 0;
             rcb(arg0, snd, a.at(2), ts);   // a.at(2): raw payload JSON — bearer's toWire handles all shapes
