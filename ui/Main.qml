@@ -65,8 +65,28 @@ Item {
   function setForceMesh(on)    { callCore("forceMesh", [on ? "1" : "0"], function () { root.refresh(); }); }
   function setMode(m)          { root.mode = m; callCore("setNodeMode", [m]); }
 
-  Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
-  Component.onCompleted: Qt.callLater(root.refresh)
+  // ── identity (loam-keycard ADR 0001): one root → separate identity per app/space + one main identity.
+  // The 12 words are kept encrypted by loam_core; unlocked once per session with a password.
+  property var hd: ({ exists: false, unlocked: false })
+  property string hdWords: ""      // shown ONCE (after create / on reveal), then cleared
+  property string hdError: ""
+  property bool hdRestoring: false
+  property bool hdBusy: false
+  function hdRefresh() { callCore("hdStatus", [], function (raw) { var o = root.parseObj(raw); if (o) root.hd = o; }); }
+  function hdRun(method, args, onOk) {
+    root.hdError = ""; root.hdBusy = true;
+    callCore(method, args, function (raw) {
+      root.hdBusy = false;
+      var o = root.parseObj(raw);
+      if (!o) { root.hdError = "no answer from loam_core"; return; }
+      if (o.error) { root.hdError = o.error; return; }
+      if (onOk) onOk(o);
+      root.hdRefresh();
+    });
+  }
+
+  Timer { interval: 2500; running: true; repeat: true; onTriggered: { root.refresh(); root.hdRefresh() } }
+  Component.onCompleted: { Qt.callLater(root.refresh); Qt.callLater(root.hdRefresh) }
 
   // ── layout ──────────────────────────────────────────────────────────────
   Rectangle { anchors.fill: parent; color: Theme.palette.background }
@@ -92,6 +112,66 @@ Item {
       }
     }
     LogosText { textFormat: Text.PlainText; text: root.statusText; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall }
+
+    // identity
+    LogosText { textFormat: Text.PlainText; text: "IDENTITY"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.topMargin: Theme.spacing.small }
+    Rectangle {
+      Layout.fillWidth: true
+      radius: Theme.spacing.radiusSmall
+      color: Theme.palette.surface
+      border.color: Theme.palette.border; border.width: 1
+      implicitHeight: idcol.implicitHeight + Theme.spacing.medium * 2
+      ColumnLayout {
+        id: idcol
+        anchors.fill: parent; anchors.margins: Theme.spacing.medium; spacing: Theme.spacing.small
+
+        // the 12 words, shown once
+        LogosText { textFormat: Text.PlainText; visible: root.hdWords.length > 0
+          text: "Write these 12 words down, in order, and keep them safe. They restore every identity on a new computer or phone. Anyone who has them can act as you."
+          color: Theme.palette.textTertiary; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+        LogosText { textFormat: Text.PlainText; visible: root.hdWords.length > 0
+          text: { var w = root.hdWords.split(" "), out = []; for (var i = 0; i < w.length; i++) out.push((i + 1) + ". " + w[i]); return out.join("    "); }
+          font.bold: true; color: Theme.palette.text; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+        LogosButton { visible: root.hdWords.length > 0; text: "I've written them down"; onClicked: root.hdWords = "" }
+
+        // no root yet
+        LogosText { textFormat: Text.PlainText; visible: !root.hd.exists && root.hdWords.length === 0
+          text: "One set of 12 recovery words gives you a separate identity in every app and every shared calendar or room, so they can't be linked, plus one main identity you share with people you know. Choose a password to protect it on this computer."
+          color: Theme.palette.textTertiary; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+        LogosTextField { id: hdWordsIn; visible: !root.hd.exists && root.hdRestoring && root.hdWords.length === 0
+          placeholderText: "your 12 recovery words"; Layout.fillWidth: true }
+        LogosTextField { id: hdPass; visible: (!root.hd.exists || !root.hd.unlocked) && root.hdWords.length === 0
+          placeholderText: root.hd.exists ? "password" : "new password (6+ characters)"; echoMode: TextInput.Password; Layout.fillWidth: true }
+        RowLayout {
+          visible: !root.hd.exists && root.hdWords.length === 0; spacing: Theme.spacing.small
+          LogosButton { visible: !root.hdRestoring; enabled: !root.hdBusy; text: root.hdBusy ? "Creating…" : "Create"
+            onClicked: root.hdRun("hdCreate", [hdPass.text], function (o) { root.hdWords = o.mnemonic || ""; hdPass.text = ""; }) }
+          LogosButton { visible: !root.hdRestoring; text: "I have recovery words"; onClicked: root.hdRestoring = true }
+          LogosButton { visible: root.hdRestoring; enabled: !root.hdBusy; text: root.hdBusy ? "Restoring…" : "Restore"
+            onClicked: root.hdRun("hdImport", [hdWordsIn.text, hdPass.text], function () { hdWordsIn.text = ""; hdPass.text = ""; root.hdRestoring = false; }) }
+          LogosButton { visible: root.hdRestoring; text: "Cancel"; onClicked: { root.hdRestoring = false; root.hdError = ""; } }
+        }
+
+        // root exists
+        LogosText { textFormat: Text.PlainText; visible: root.hd.exists && root.hdWords.length === 0
+          text: "Main identity — share it with family and friends so they can add you to calendars and contacts."
+          color: Theme.palette.textTertiary; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+        LogosText { textFormat: Text.PlainText; visible: root.hd.exists && root.hdWords.length === 0
+          text: root.hd.mainAddress || ""; font.family: "monospace"; color: Theme.palette.text }
+        LogosText { textFormat: Text.PlainText; visible: root.hd.exists && root.hdWords.length === 0
+          text: root.hd.unlocked ? "Unlocked — your apps can sign." : "Locked — unlock so your apps can sign."
+          color: root.hd.unlocked ? Theme.palette.success : Theme.palette.warning; font.pixelSize: Theme.typography.sizeSmall }
+        RowLayout {
+          visible: root.hd.exists && root.hdWords.length === 0; spacing: Theme.spacing.small
+          LogosButton { visible: !root.hd.unlocked; enabled: !root.hdBusy; text: root.hdBusy ? "Unlocking…" : "Unlock"
+            onClicked: root.hdRun("hdUnlock", [hdPass.text], function () { hdPass.text = ""; }) }
+          LogosButton { visible: root.hd.unlocked; text: "Lock"; onClicked: root.hdRun("hdLock", []) }
+          LogosButton { visible: !root.hd.unlocked; text: "Show recovery words"
+            onClicked: root.hdRun("hdExport", [hdPass.text], function (o) { root.hdWords = o.mnemonic || ""; hdPass.text = ""; }) }
+        }
+        LogosText { textFormat: Text.PlainText; visible: root.hdError.length > 0; text: root.hdError; color: Theme.palette.error }
+      }
+    }
 
     // bearers
     LogosText { textFormat: Text.PlainText; text: "BEARERS"; color: Theme.palette.textTertiary; font.pixelSize: Theme.typography.sizeSmall; Layout.topMargin: Theme.spacing.small }
