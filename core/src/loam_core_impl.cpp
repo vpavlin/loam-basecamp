@@ -11,6 +11,9 @@
 #include <QTimer>
 #include <sstream>
 #include "loam_identity.hpp"    // loam ADR 0004 identity service (crypto + key/binding store)
+#include "loam_hd.hpp"          // ADR 0001 deterministic identities (BIP39 + hardened BIP32)
+#include "loam_vault.hpp"       // encrypted root (scrypt + AES-128-CTR)
+#include <cstdio>
 
 using DB = loam::DeliveryBearer<LogosMap>;
 
@@ -357,6 +360,134 @@ std::string LoamCoreImpl::bindContainer(std::string containerId, std::string ide
 std::string LoamCoreImpl::identityForContainer(std::string containerId) { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->identityForContainer(containerId).dump(); }
 std::string LoamCoreImpl::signDigest(std::string containerId, std::string digestHex) { std::lock_guard<std::recursive_mutex> lk(m_mtx); return idStore()->signDigest(containerId, digestHex).dump(); }
 std::string LoamCoreImpl::removeKeycardIdentity(std::string id) { std::lock_guard<std::recursive_mutex> lk(m_mtx); idStore()->removeKeycardIdentity(id); return "{\"ok\":true}"; }
+
+// ── HD identities (loam-keycard ADR 0001) ─────────────────────────────────────
+// One root (a BIP39 phrase) → hardened per-(app, space) keys + one shared main identity. The phrase
+// is stored ONLY encrypted (loam_vault.hpp); the derived seed lives in memory while unlocked. The
+// vault also records the main identity's public key so a locked loam can still say who "main" is.
+namespace {
+nlohmann::json hdErr(const std::string& e) { return nlohmann::json{{"error", e}}; }
+nlohmann::json readJsonFile(const std::string& path) {
+    std::ifstream f(path); if (!f) return nullptr;
+    std::stringstream ss; ss << f.rdbuf();
+    try { return nlohmann::json::parse(ss.str()); } catch (...) { return nullptr; }
+}
+bool writeJsonFile(const std::string& path, const nlohmann::json& j) {
+    const std::string tmp = path + ".tmp";
+    { std::ofstream f(tmp, std::ios::trunc); if (!f) return false; f << j.dump(2); if (!f) return false; }
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+}
+std::string LoamCoreImpl::hdVaultPath() const {
+    const char* env = std::getenv("LOAM_CORE_DATA");
+    std::string d = env ? env : (std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") + "/.loam-core");
+    QDir().mkpath(QString::fromStdString(d));
+    return d + "/hd-root.json";
+}
+nlohmann::json LoamCoreImpl::hdStatusJson() {
+    nlohmann::json v = readJsonFile(hdVaultPath());
+    nlohmann::json st{{"exists", !v.is_null()}, {"unlocked", !m_hdSeed.empty()}};
+    if (!v.is_null() && v.contains("main")) { st["mainAddress"] = v["main"].value("address", ""); st["mainPubHex"] = v["main"].value("pubHex", ""); }
+    return st;
+}
+std::string LoamCoreImpl::hdStatus() { std::lock_guard<std::recursive_mutex> lk(m_mtx); return hdStatusJson().dump(); }
+
+static std::string hdSaveRoot(const std::string& path, const std::string& mnemonic, const std::string& password,
+                              std::vector<unsigned char>& seedOut, nlohmann::json& mainOut) {
+    if (password.size() < 6) return "password must be at least 6 characters";
+    nlohmann::json v = loamhd::sealMnemonic(mnemonic, password);
+    if (v.is_null()) return "could not encrypt the root";
+    seedOut = loamhd::seedFromMnemonic(mnemonic);
+    loamhd::Derived m = loamhd::derive(seedOut, "", "");
+    if (!m.ok) { seedOut.clear(); return "derivation failed"; }
+    mainOut = {{"address", m.address}, {"pubHex", m.pubHex}};
+    v["main"] = mainOut;
+    if (!writeJsonFile(path, v)) { seedOut.clear(); return "could not write the root file"; }
+    return "";
+}
+std::string LoamCoreImpl::hdCreate(std::string password) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!readJsonFile(hdVaultPath()).is_null()) return hdErr("a root already exists").dump();
+    const std::string m = loamhd::newMnemonic();
+    if (m.empty()) return hdErr("no randomness").dump();
+    nlohmann::json main;
+    std::string e = hdSaveRoot(hdVaultPath(), m, password, m_hdSeed, main);
+    if (!e.empty()) return hdErr(e).dump();
+    hdStatusChanged(hdStatusJson().dump());
+    return nlohmann::json{{"mnemonic", m}, {"mainAddress", main["address"]}}.dump();
+}
+std::string LoamCoreImpl::hdImport(std::string mnemonic, std::string password) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!readJsonFile(hdVaultPath()).is_null()) return hdErr("a root already exists").dump();
+    const std::string m = loamhd::normalizeMnemonic(mnemonic);
+    if (!loamhd::validMnemonic(m)) return hdErr("invalid recovery phrase").dump();
+    nlohmann::json main;
+    std::string e = hdSaveRoot(hdVaultPath(), m, password, m_hdSeed, main);
+    if (!e.empty()) return hdErr(e).dump();
+    hdStatusChanged(hdStatusJson().dump());
+    return nlohmann::json{{"mainAddress", main["address"]}}.dump();
+}
+std::string LoamCoreImpl::hdUnlock(std::string password) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    nlohmann::json v = readJsonFile(hdVaultPath());
+    if (v.is_null()) return hdErr("no root").dump();
+    std::string err; std::string m = loamhd::openMnemonic(v, password, err);
+    if (m.empty()) return hdErr(err.empty() ? "could not open" : err).dump();
+    m_hdSeed = loamhd::seedFromMnemonic(m);
+    OPENSSL_cleanse(&m[0], m.size());
+    hdStatusChanged(hdStatusJson().dump());
+    return hdStatusJson().dump();
+}
+std::string LoamCoreImpl::hdLock() {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (!m_hdSeed.empty()) OPENSSL_cleanse(m_hdSeed.data(), m_hdSeed.size());
+    m_hdSeed.clear();
+    hdStatusChanged(hdStatusJson().dump());
+    return "{\"ok\":true}";
+}
+std::string LoamCoreImpl::hdExport(std::string password) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    nlohmann::json v = readJsonFile(hdVaultPath());
+    if (v.is_null()) return hdErr("no root").dump();
+    std::string err; std::string m = loamhd::openMnemonic(v, password, err);
+    if (m.empty()) return hdErr(err.empty() ? "could not open" : err).dump();
+    return nlohmann::json{{"mnemonic", m}}.dump();
+}
+std::string LoamCoreImpl::hdForget(std::string password) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    nlohmann::json v = readJsonFile(hdVaultPath());
+    if (v.is_null()) return hdErr("no root").dump();
+    std::string err;
+    if (loamhd::openMnemonic(v, password, err).empty()) return hdErr(err.empty() ? "could not open" : err).dump();
+    std::remove(hdVaultPath().c_str());
+    if (!m_hdSeed.empty()) OPENSSL_cleanse(m_hdSeed.data(), m_hdSeed.size());
+    m_hdSeed.clear();
+    hdStatusChanged(hdStatusJson().dump());
+    return "{\"ok\":true}";
+}
+std::string LoamCoreImpl::hdIdentity(std::string appId, std::string contextId) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (m_hdSeed.empty()) return hdErr(readJsonFile(hdVaultPath()).is_null() ? "no root" : "locked").dump();
+    if (contextId.empty()) appId.clear();          // "" context = the main identity
+    else if (appId.empty()) return hdErr("appId required").dump();
+    loamhd::Derived d = loamhd::derive(m_hdSeed, appId, contextId);
+    if (!d.ok) return hdErr("derivation failed").dump();
+    return nlohmann::json{{"address", d.address}, {"pubHex", d.pubHex}, {"path", d.path}}.dump();
+}
+std::string LoamCoreImpl::hdSign(std::string appId, std::string contextId, std::string digestHex) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (m_hdSeed.empty()) return hdErr(readJsonFile(hdVaultPath()).is_null() ? "no root" : "locked").dump();
+    if (contextId.empty()) appId.clear();
+    else if (appId.empty()) return hdErr("appId required").dump();
+    loamid::Bytes digest = loamid::fromHexB(digestHex);
+    if (digest.size() != 32 || digestHex.size() != 64) return hdErr("digest must be 32 bytes hex").dump();
+    loamhd::Derived d = loamhd::derive(m_hdSeed, appId, contextId);
+    if (!d.ok) return hdErr("derivation failed").dump();
+    loamid::Bytes sig = loamid::ecdsaSignLowS(d.priv, digest);
+    OPENSSL_cleanse(d.priv.data(), d.priv.size());
+    if (sig.size() != 64) return hdErr("sign failed").dump();
+    return nlohmann::json{{"sig", loamid::toHexS(sig.data(), sig.size())}, {"pub", d.pubHex}, {"address", d.address}}.dump();
+}
 
 // ── keycard identity delegation (scala ADR 0016) ──────────────────────────────
 // A keycard identity's private key lives on the card; loam delegates signing to Alisher's keycard
