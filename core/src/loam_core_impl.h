@@ -150,6 +150,7 @@ private:
     // connected and stays at 0 peers for a sustained window, re-dial the entryNodes (bearer reconnect).
     int m_zeroPeerStreak = 0; bool m_everConnected = false; long long m_lastReconnectMs = 0;
     std::string m_senderId = "loam-core";
+    std::string senderSecret() const;
     std::string m_mode = "Core";     // delivery bearer node mode (Core|Edge)
     std::string m_status = "Starting...";
     std::recursive_mutex m_mtx;

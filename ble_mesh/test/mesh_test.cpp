@@ -1,3 +1,4 @@
+#include <set>
 // mesh_test.cpp — unit tests for the portable BLE mesh (mesh.hpp), mirroring loam-transport's
 // bearer.ts suite: frame codec round-trip, frameId (deterministic + hop-independent + parity
 // vectors), flood, cross-bearer dedup, store-carry-forward, TTL exhaustion, N-node convergence.
@@ -45,6 +46,7 @@ struct Node {
   Node(MockMesh* m, const std::string& id, int ttl = 6) {
     radio.id = id; radio.mesh = m; m->radios[id] = &radio;
     bearer = std::make_unique<BleMeshBearer>(&radio, ttl);
+    bearer->setPrivacy(0, 0, 0, nullptr);   // deterministic hops, no jitter
     bearer->onReceive([this](const Frame& f) { got.push_back(f); });
     bearer->start();
   }
@@ -107,6 +109,29 @@ int main() {
     A.bearer->send("/t", "short");
     CHECK(B.got.size() == 1, "B (1 hop) receives");
     CHECK(C.got.empty(), "C does NOT receive (ttl=1 exhausted at B, no carry-forward)");
+  }
+  // 7b. sender privacy (ADR 0022): a new frame leaves at a hop in [ttl-2, ttl]; a relay clamps to its TTL;
+  //     a send with jitter goes through the injected defer, not straight to the radio
+  {
+    MockMesh m; Node A(&m, "A", 7), B(&m, "B", 7); m.connect("A", "B");
+    A.bearer->setPrivacy(2, 0, 0, nullptr);
+    std::set<int> hops;
+    for (int i = 0; i < 200; ++i) { A.bearer->send("/t", "p" + std::to_string(i)); }
+    for (auto& f : B.got) hops.insert(f.hop);
+    CHECK(hops == std::set<int>({5, 6, 7}), "origin hops spread over 5..7");
+    MockMesh m2; Node X(&m2, "X", 3), Y(&m2, "Y", 3), Z(&m2, "Z", 3); m2.connect("X", "Y"); m2.connect("Y", "Z");
+    X.radio.cb("Y", encodeFrame(makeFrame("/t", "big", 200)));
+    Frame relayed{"", "", 0, ""}; bool got = false;
+    Z.bearer->onReceive([&](const Frame& f) { relayed = f; got = true; });
+    Y.radio.cb("X", encodeFrame(makeFrame("/t", "big2", 200)));
+    CHECK(got && relayed.hop == 2, "relay clamps a hop of 200 to its TTL (3) minus one");
+    MockMesh m3; Node P(&m3, "P", 7), Q(&m3, "Q", 7); m3.connect("P", "Q");
+    std::vector<std::function<void()>> pending;
+    P.bearer->setPrivacy(0, 10, 220, [&](int ms, std::function<void()> fn) { CHECK(ms >= 10 && ms <= 220, "jitter in range"); pending.push_back(fn); });
+    P.bearer->send("/t", "later");
+    CHECK(Q.got.empty() && pending.size() == 1, "nothing on the air until the jitter fires");
+    pending[0]();
+    CHECK(Q.got.size() == 1, "delivered once the deferred send runs");
   }
   // 8. N-node convergence: a 6-node line, A floods, everyone downstream within TTL gets it once
   {

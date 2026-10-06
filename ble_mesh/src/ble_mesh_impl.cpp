@@ -1,5 +1,6 @@
 // ble_mesh_impl.cpp — the module wiring around the portable gossip (mesh.hpp).
 #include "ble_mesh_impl.h"
+#include <QTimer>
 #include "logos_sdk.h"   // umbrella (kept for parity with other modules; ble_mesh has no deps)
 #ifdef LOAM_HAS_QTBLUETOOTH
 #include "mesh_radio_qt.hpp"   // the real Qt Bluetooth radio (Phase 3), built when qtconnectivity is present
@@ -22,7 +23,7 @@ static std::string loamNodeId() {
 #endif
 }
 
-BleMeshImpl::~BleMeshImpl() { if (m_bearer) m_bearer->stop(); }
+BleMeshImpl::~BleMeshImpl() { m_alive.reset(); if (m_bearer) m_bearer->stop(); }
 
 void BleMeshImpl::onContextReady() {
   std::lock_guard<std::recursive_mutex> lk(m_mtx);
@@ -37,6 +38,16 @@ void BleMeshImpl::onContextReady() {
   m_status = "ready (stub radio — 0 peers; build with qtconnectivity for the Qt Bluetooth radio)";
 #endif
   m_bearer = std::make_unique<BleMeshBearer>(m_radio.get());
+  // ADR 0022: random origin hop + 10-220 ms jitter on every send/relay, run on the Qt loop. `alive`
+  // keeps a timer that fires after the bearer is gone from touching it.
+  std::weak_ptr<bool> alive = m_alive;
+  m_bearer->setPrivacy(2, 10, 220, [this, alive](int ms, std::function<void()> fn) {
+    QTimer::singleShot(ms, [this, alive, fn]() {
+      if (alive.expired()) return;
+      std::lock_guard<std::recursive_mutex> lk(m_mtx);
+      fn();
+    });
+  });
   // Deliver received frames up: re-base64 the once-decoded sealed bytes for IPC safety. (When the
   // Qt radio delivers on its own thread in Phase 3, marshal this emit onto the module thread —
   // Qt Remote Objects drops cross-thread signal emits; same rule as loam_core.)

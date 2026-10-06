@@ -9,6 +9,9 @@
 #include "ble_module_bearer.hpp"// BleModuleBearer — fronts the ble_mesh module (Ops bound below)
 #include "logos_result.h"      // StdLogosResult {success, value, error}
 #include <QTimer>
+#include <QDir>
+#include <QFile>
+#include <fstream>
 #include <sstream>
 #include "loam_identity.hpp"    // loam ADR 0004 identity service (crypto + key/binding store)
 #include "loam_hd.hpp"          // ADR 0001 deterministic identities (BIP39 + hardened BIP32)
@@ -110,6 +113,18 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
 
     DB::Config cfg;
     cfg.deviceId = m_senderId;
+    // Same derivation as the phone (loam-transport real-node.ts senderFor), keyed by a random
+    // per-install secret, never by what apps pass to setSenderId (Scala/Kith pass their signing identity).
+    {
+        const std::string secret = senderSecret();
+        cfg.senderFor = [secret](const std::string& topic) {
+            const std::string in = "loam-sds-sender-v1|" + secret + "|" + topic;
+            unsigned char h[32]; SHA256(reinterpret_cast<const unsigned char*>(in.data()), in.size(), h);
+            static const char* hx = "0123456789abcdef"; std::string out;
+            for (int i = 0; i < 12; ++i) { out.push_back(hx[h[i] >> 4]); out.push_back(hx[h[i] & 15]); }
+            return out;
+        };
+    }
     // Parse the app's cfg. loam-only keys (useChannels, hubMode) are pulled OUT into Config;
     // everything else is the delivery node config (WakuNodeConf) forwarded verbatim to
     // createNode — so the app's shard/cluster/entryNodes/preset/mode all pass through.
@@ -377,6 +392,21 @@ bool writeJsonFile(const std::string& path, const nlohmann::json& j) {
     { std::ofstream f(tmp, std::ios::trunc); if (!f) return false; f << j.dump(2); if (!f) return false; }
     return std::rename(tmp.c_str(), path.c_str()) == 0;
 }
+}
+// Random per-install secret for the per-topic SDS sender ids (created on first use, kept in the data dir).
+std::string LoamCoreImpl::senderSecret() const {
+    const char* env = std::getenv("LOAM_CORE_DATA");
+    std::string d = env ? env : (std::string(std::getenv("HOME") ? std::getenv("HOME") : "/tmp") + "/.loam-core");
+    QDir().mkpath(QString::fromStdString(d));
+    const std::string path = d + "/sender-secret";
+    { std::ifstream f(path); std::string v; if (f && std::getline(f, v) && v.size() >= 32) return v; }
+    unsigned char b[32];
+    if (RAND_bytes(b, sizeof b) != 1) return m_senderId;
+    static const char* hx = "0123456789abcdef"; std::string v;
+    for (unsigned char c : b) { v.push_back(hx[c >> 4]); v.push_back(hx[c & 15]); }
+    { std::ofstream f(path, std::ios::trunc); f << v << "\n"; }
+    QFile::setPermissions(QString::fromStdString(path), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return v;
 }
 std::string LoamCoreImpl::hdVaultPath() const {
     const char* env = std::getenv("LOAM_CORE_DATA");

@@ -40,7 +40,10 @@ public:
         std::function<void(std::function<void(bool ok, const std::string &msg)>)> onNodeStarted;
     };
     struct Config {
-        std::string deviceId;                // SDS senderId
+        std::string deviceId;                // SDS senderId when senderFor is unset
+        // Per-topic SDS sender id (loam-transport ADR 0022): the sender id is sent in the clear, so one
+        // id for every topic links all of a desktop's apps and rooms. When set, used instead of deviceId.
+        std::function<std::string(const std::string &topic)> senderFor;
         bool useChannels = true;             // SDS Reliable Channels (interops with mobile)
         bool hubMode = false;                // headless: delay createNode so handler IPC lands first
         // The FULL delivery createNode config (WakuNodeConf) as JSON, forwarded verbatim to
@@ -271,7 +274,7 @@ private:
     void doJoin(const std::string &topic) {
         if (m_cfg.useChannels) {
             if (m_ops.subscribe)     m_ops.subscribe(topic, noop());                       // recv service gate
-            if (m_ops.channelCreate) m_ops.channelCreate(topic, topic, m_cfg.deviceId, noop());
+            if (m_ops.channelCreate) m_ops.channelCreate(topic, topic, m_cfg.senderFor ? m_cfg.senderFor(topic) : m_cfg.deviceId, noop());
         } else {
             if (m_ops.subscribe)     m_ops.subscribe(topic, noop());
         }

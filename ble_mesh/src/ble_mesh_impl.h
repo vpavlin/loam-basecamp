@@ -48,4 +48,5 @@ private:
   bool m_started = false;
   std::string m_status = "idle";
   std::recursive_mutex m_mtx;
+  std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);   // expires before teardown; guards jitter timers
 };

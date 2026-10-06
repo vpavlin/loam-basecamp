@@ -12,6 +12,8 @@
 #include <memory>
 #include <cstdint>
 #include <openssl/sha.h>
+#include <random>
+#include <algorithm>
 
 namespace loam { namespace mesh {
 
@@ -109,9 +111,26 @@ struct MeshRadio {
 // Flood-gossip bearer: send = flood a frame to all neighbours; receive = deliver locally ONCE,
 // then carry-forward to the OTHER neighbours at hop-1 until TTL runs out or the seen-set kills it.
 // Deliberately dumb — convergence is loam-sync's job, not the mesh's.
+//
+// Sender privacy (loam-transport ADR 0022, same rules as bearer.ts): a new frame starts at
+// ttl - random(0..originHopSpread) instead of always at ttl (a frame seen at the max hop marks its
+// sender), and every send or relay waits a random jitter delay. The delay runs through an injected
+// `defer` (the module binds it to QTimer; the default runs immediately, so tests stay synchronous).
 class BleMeshBearer {
+public:
+  using Defer = std::function<void(int ms, std::function<void()>)>;
+private:
   MeshRadio* radio_; SeenSet seen_; int ttl_;
+  int spread_ = 2; int jitterLo_ = 10; int jitterHi_ = 220;
+  Defer defer_ = [](int, std::function<void()> fn) { fn(); };
+  std::mt19937 rng_{std::random_device{}()};
   std::function<void(const Frame&)> rx_ = [](const Frame&) {};
+  int randIn(int lo, int hi) { return hi <= lo ? lo : std::uniform_int_distribution<int>(lo, hi)(rng_); }
+  void later(std::function<void()> fn) {
+    const int ms = jitterHi_ <= 0 ? 0 : randIn(jitterLo_, jitterHi_);
+    if (ms <= 0) { fn(); return; }
+    defer_(ms, [fn]() { try { fn(); } catch (...) { /* a radio error must not escape a timer */ } });
+  }
   void broadcastExcept(const std::string* except, const Frame& f) {
     Bytes bytes = encodeFrame(f);
     for (const auto& p : radio_->peers()) if (!except || p != *except) radio_->sendTo(p, bytes);
@@ -121,24 +140,34 @@ class BleMeshBearer {
     if (seen_.has(f.id)) return;                         // loop / already delivered
     seen_.add(f.id);
     try { rx_(f); } catch (...) { /* never let a consumer kill the mesh */ }
-    if (f.hop > 1) { f.hop -= 1; broadcastExcept(&from, f); }   // store-carry-forward
+    if (f.hop > 1) {                                     // store-carry-forward, hop clamped to our TTL
+      f.hop = std::min(f.hop, ttl_) - 1;
+      std::string peer = from;
+      later([this, peer, f]() { broadcastExcept(&peer, f); });
+    }
   }
 public:
-  explicit BleMeshBearer(MeshRadio* r, int ttl = 6, size_t seenCap = 4096)
+  explicit BleMeshBearer(MeshRadio* r, int ttl = 7, size_t seenCap = 4096)
     : radio_(r), seen_(seenCap), ttl_(ttl) {}
   const char* name() const { return "ble"; }
+  // originHopSpread 0 and jitter 0..0 = the old deterministic behaviour (tests).
+  void setPrivacy(int originHopSpread, int jitterLoMs, int jitterHiMs, Defer defer) {
+    spread_ = originHopSpread; jitterLo_ = jitterLoMs; jitterHi_ = jitterHiMs;
+    if (defer) defer_ = std::move(defer);
+  }
   void start() { radio_->onReceiveFrom([this](const std::string& p, const Bytes& b) { onRadio(p, b); }); radio_->start(); }
   void stop() { radio_->stop(); }
   int reachablePeers() { return static_cast<int>(radio_->peers().size()); }
   void onReceive(std::function<void(const Frame&)> cb) { rx_ = std::move(cb); }
 
-  // Originate a local write onto the mesh: flood to every neighbour at full TTL (deduped so we
-  // don't re-flood something we already originated/saw).
+  // Originate a local write onto the mesh: flood to every neighbour (deduped so we don't re-flood
+  // something we already originated/saw), starting at a random hop in [ttl - spread, ttl].
   void send(const std::string& topic, const Bytes& payload) {
-    Frame f = makeFrame(topic, payload, ttl_);
+    const int spread = std::max(0, std::min(spread_, ttl_ - 1));
+    Frame f = makeFrame(topic, payload, ttl_ - randIn(0, spread));
     if (seen_.has(f.id)) return;
     seen_.add(f.id);
-    broadcastExcept(nullptr, f);
+    later([this, f]() { broadcastExcept(nullptr, f); });
   }
 };
 
