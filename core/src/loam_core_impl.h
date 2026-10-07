@@ -11,6 +11,7 @@ namespace loamid { class IdentityStore; }   // loam ADR 0004 identity service �
 #include "logos_module_context.h"   // LogosModuleContext base + logos_events: + modules()
 #include "logos_lp_client.h"         // logos::LpClient/LpSubscription — RAW delivery event subscribe
 #include <vector>
+#include <nlohmann/json.hpp>
 #include "multibearer.hpp"          // IBearer + MultiBearer (std::string only, no LogosMap)
 // NOTE: the generated modules() type + LogosMap live in the umbrella "logos_sdk.h", which
 // is included only in the .cpp (it can't appear in this generator-read header). The delivery
@@ -78,6 +79,24 @@ public:
     std::string keycardSign(std::string containerId, std::string digestHex, std::string ref);
     std::string removeKeycardIdentity(std::string id);
 
+    // --- HD identities (loam-keycard ADR 0001): one root (12 words) → unlinkable per-app/per-space keys.
+    // The root is kept encrypted (scrypt + AES-128-CTR) and unlocked once per session with a password.
+    // contextId "" = the shared main identity. All return JSON; failures are {"error": "..."}.
+    // hdStatus → {exists, unlocked, mainAddress, mainPubHex}.
+    std::string hdStatus();
+    // Create a new root; returns {mnemonic, mainAddress} ONCE so the user can write the 12 words down.
+    std::string hdCreate(std::string password);
+    std::string hdImport(std::string mnemonic, std::string password);
+    std::string hdUnlock(std::string password);
+    std::string hdLock();
+    // Show the 12 words again (password required). Removing the root also requires the password.
+    std::string hdExport(std::string password);
+    std::string hdForget(std::string password);
+    // The identity for (app, space) → {address, pubHex, path}; requires the root to be unlocked.
+    std::string hdIdentity(std::string appId, std::string contextId);
+    // Sign a 32-byte hex digest with that identity → {sig (64-byte r||s, low-S), pub, address}.
+    std::string hdSign(std::string appId, std::string contextId, std::string digestHex);
+
     // --- metrics API (loam_ui polls these) ---
     std::string metricsJson();
     std::string status();
@@ -99,6 +118,8 @@ logos_events:
     // Result of an async enrollKeycard / keycardSign, matched by the caller-chosen `ref`.
     // resultJson = {sig,pub,address} | (enrol) {id,kind,label,address,pubHex,domain} | {error}.
     void keycardSignResult(const std::string& ref, const std::string& resultJson);
+    // The HD root was created, imported, unlocked, locked or removed (statusJson = hdStatus()).
+    void hdStatusChanged(const std::string& statusJson);
 
 private:
     void ensureBearers(const std::string& cfgJson);   // build the delivery bearer (once)
@@ -129,9 +150,14 @@ private:
     // connected and stays at 0 peers for a sustained window, re-dial the entryNodes (bearer reconnect).
     int m_zeroPeerStreak = 0; bool m_everConnected = false; long long m_lastReconnectMs = 0;
     std::string m_senderId = "loam-core";
+    std::string senderSecret() const;
     std::string m_mode = "Core";     // delivery bearer node mode (Core|Edge)
     std::string m_status = "Starting...";
     std::recursive_mutex m_mtx;
     QTimer* m_metricsTimer = nullptr;
-    std::deque<std::string> m_rxLog;   // recent received frames (JSON strings); drained by recentReceived()
+    std::deque<std::string> m_rxLog;
+    // HD root (ADR 0001): the unlocked BIP39 seed lives only in memory; empty = locked.
+    std::vector<unsigned char> m_hdSeed;
+    std::string hdVaultPath() const;
+    nlohmann::json hdStatusJson();   // recent received frames (JSON strings); drained by recentReceived()
 };

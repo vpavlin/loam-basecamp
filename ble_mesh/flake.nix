@@ -2,8 +2,8 @@
   description = "ble_mesh — Loam BLE offline-mesh bearer as a reusable logos-core module (ADR 0015).";
 
   inputs = {
-    # released tooling baseline (same as loam_core, Basecamp 0.2.x). ble_mesh has NO module dependencies.
-    logos-module-builder.url = "github:logos-co/logos-module-builder/0.2.6";
+    # builder 0.3.1 (Basecamp 0.3.x). ble_mesh has NO module dependencies.
+    logos-module-builder.url = "github:logos-co/logos-module-builder/0.3.1";
     nixpkgs.follows = "logos-module-builder/nixpkgs";
     # lgx CLI: re-adds a variant with extra files so the manifest hashes stay correct.
     logos-package.url = "github:logos-co/logos-package/c25a1167578aef5cbd9a9b6f822ffe2ae4fd6a89";
@@ -18,7 +18,7 @@
       };
 
       # The portable bundler never packages Qt libraries (the host provides Qt), but Basecamp
-      # (0.2.x .. 0.3.1, Qt 6.9.2; x86_64 AND arm64 AppImages) ships no QtBluetooth, so ble_mesh failed to load with
+      # (0.2.3 .. 0.3.1, Qt 6.9.2) ships no QtBluetooth, so ble_mesh failed to load with
       # "libQt6Bluetooth.so.6: cannot open shared object file" — and took loam_core and every app
       # on it down too. Bundle the library next to the plugin, built from the SAME Qt the module
       # links against, with RUNPATH=$ORIGIN; it needs only Core/DBus/Network, which the host has.

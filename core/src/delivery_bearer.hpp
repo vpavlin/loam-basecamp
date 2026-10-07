@@ -7,6 +7,7 @@
 // the `Ops` std::functions built in the .cpp. See ADR 0015 + basecamp/README.md.
 #pragma once
 #include <set>
+#include "segment_compat.hpp"
 #include "multibearer.hpp"
 #include <string>
 #include <vector>
@@ -34,9 +35,15 @@ public:
         std::function<void(const std::string &contentTopic, const LogosMap &payload, Cb)> sendRaw;
         std::function<void(RecvCb)> onMessage;         // raw relay receive
         std::function<void(RecvCb)> onChannelMessage;  // SDS channel receive
+        // delivery >= 0.3.0: start() only DISPATCHES; the outcome arrives as nodeStarted(success,
+        // message). When set, readiness waits for it (a failed START_NODE no longer reads as up).
+        std::function<void(std::function<void(bool ok, const std::string &msg)>)> onNodeStarted;
     };
     struct Config {
-        std::string deviceId;                // SDS senderId
+        std::string deviceId;                // SDS senderId when senderFor is unset
+        // Per-topic SDS sender id (loam-transport ADR 0022): the sender id is sent in the clear, so one
+        // id for every topic links all of a desktop's apps and rooms. When set, used instead of deviceId.
+        std::function<std::string(const std::string &topic)> senderFor;
         bool useChannels = true;             // SDS Reliable Channels (interops with mobile)
         bool hubMode = false;                // headless: delay createNode so handler IPC lands first
         // The FULL delivery createNode config (WakuNodeConf) as JSON, forwarded verbatim to
@@ -55,6 +62,7 @@ public:
     // Fired once when the node finishes createNode+start (the readiness signal loam_core
     // turns into a statusChanged("Connected") event for apps — start() itself returns early).
     std::function<void()> onReady;
+    std::function<void(const std::string &)> onError;   // node failed to start (message from delivery)
 
     void start() override {
         if (m_nodeReady || m_starting || m_reconnecting) return;
@@ -91,7 +99,13 @@ public:
             const bool isSds = !f5.empty() && !f4.empty() && f4.rfind("/", 0) == 0;
             if (isSds) {
                 tpc = f4;                                      // authoritative content topic
-                sealed = f5;                                   // RAW field-5 content; app peels b64
+                // delivery >= 0.3.0 (lib v0.39) wraps the content in a LIP-243 SegmentMessage even when it
+                // fits one segment; 0.1.4 / the phones don't. Accept both (segment_compat.hpp).
+                sealed = loam::segcompat::unwrapSingleSegment(f5);   // RAW content; app peels b64
+                if (loam::segcompat::isSegmentWrapped(sealed)) {   // part of a multi-segment set (> 100 KiB)
+                    ++m_rxSegmented;                                 // reassembly not supported yet
+                    return;
+                }
                 const std::string s7 = sdsField(enc, 7);
                 if (!s7.empty()) snd = s7;
             } else {
@@ -117,8 +131,39 @@ public:
             m_ops.createNode(cfgStr, [this](bool ok, const std::string &err) {
                 if (!ok) { m_starting = false; fprintf(stderr, "loam delivery createNode err: %s\n", err.c_str()); return; }
                 if (!m_ops.start) { m_starting = false; return; }
+                if (m_ops.onNodeStarted && !m_startSubscribed) {
+                    m_startSubscribed = true;
+                    m_ops.onNodeStarted([this](bool ok, const std::string &msg) { onStarted(ok, msg); });
+                }
+                m_awaitStart = (bool)m_ops.onNodeStarted;   // set BEFORE dispatch: the event may beat the reply
                 m_ops.start([this](bool ok2, const std::string &err2) {
-                    if (!ok2) { m_starting = false; fprintf(stderr, "loam delivery start err: %s\n", err2.c_str()); return; }
+                    if (!ok2) { m_awaitStart = false; m_starting = false;
+                                fprintf(stderr, "loam delivery start err: %s\n", err2.c_str());
+                                if (onError) onError(err2); return; }
+                    if (m_ops.onNodeStarted) return;            // outcome comes via nodeStarted → onStarted()
+                    becomeReady();
+                });
+            });
+        };
+        if (m_cfg.hubMode && m_delay) m_delay(1500, startNode); else startNode();
+    }
+
+    void onStarted(bool ok, const std::string &msg) {
+        if (!m_awaitStart) return;
+        m_awaitStart = false;
+        if (!ok) {
+            m_starting = false; m_reconnecting = false;
+            fprintf(stderr, "loam delivery: node failed to start: %s\n", msg.c_str()); fflush(stderr);
+            if (onError) onError(msg);
+            return;
+        }
+        if (m_reconnecting) { m_reconnecting = false; m_nodeReady = true;
+                              for (const auto &t : m_allTopics) doJoin(t);
+                              if (onReady) onReady(); return; }
+        becomeReady();
+    }
+
+    void becomeReady() {
                     m_nodeReady = true; m_starting = false;
                     // RE-SUBSCRIBE receive handlers now that the delivery host is LISTENING.
                     // The generated event-subscription (cpp-sdk pre-#134 9d508292e) does a blocking
@@ -131,10 +176,6 @@ public:
                     for (const auto &t : m_pendingTopics) doJoin(t);   // (re)join topics requested before ready
                     m_pendingTopics.clear();
                     if (onReady) onReady();                            // → loam_core emits "Connected"
-                });
-            });
-        };
-        if (m_cfg.hubMode && m_delay) m_delay(1500, startNode); else startNode();
     }
 
     void join(const std::string &topic) override {
@@ -153,7 +194,10 @@ public:
         fflush(stderr);
         auto doStart = [this]() {
             if (!m_ops.start) { m_reconnecting = false; return; }
+            m_awaitStart = (bool)m_ops.onNodeStarted;
             m_ops.start([this](bool ok, const std::string &err) {
+                if (ok && m_ops.onNodeStarted) return;          // finished in onStarted()
+                m_awaitStart = false;
                 m_reconnecting = false;
                 if (!ok) { fprintf(stderr, "loam reconnect start err: %s\n", err.c_str()); return; }
                 m_nodeReady = true;
@@ -192,7 +236,8 @@ public:
         o += ",\"ready\":" + std::string(m_nodeReady ? "true" : "false");
         o += ",\"peers\":" + std::to_string(m_peers);
         o += ",\"rx\":" + std::to_string((long long)m_rx);
-        o += ",\"tx\":" + std::to_string((long long)m_tx) + "}";
+        o += ",\"tx\":" + std::to_string((long long)m_tx);
+        o += ",\"rxSegmented\":" + std::to_string((long long)m_rxSegmented) + "}";
         return o;
     }
 
@@ -229,7 +274,7 @@ private:
     void doJoin(const std::string &topic) {
         if (m_cfg.useChannels) {
             if (m_ops.subscribe)     m_ops.subscribe(topic, noop());                       // recv service gate
-            if (m_ops.channelCreate) m_ops.channelCreate(topic, topic, m_cfg.deviceId, noop());
+            if (m_ops.channelCreate) m_ops.channelCreate(topic, topic, m_cfg.senderFor ? m_cfg.senderFor(topic) : m_cfg.deviceId, noop());
         } else {
             if (m_ops.subscribe)     m_ops.subscribe(topic, noop());
         }
@@ -237,6 +282,9 @@ private:
 
     Ops m_ops; Config m_cfg; Delay m_delay;
     bool m_nodeReady = false, m_starting = false, m_reconnecting = false;
+    uint64_t m_rxSegmented = 0;
+    bool m_awaitStart = false;        // start() dispatched, waiting for nodeStarted (delivery >= 0.3.0)
+    bool m_startSubscribed = false;   // nodeStarted handler registered once   // frames that were part of a multi-segment set (dropped: no reassembly yet)
     int m_sendRepr = 0;      // 0 unprobed, 1 byte array, 2 string
     long m_peers = -1;
     std::vector<std::string> m_pendingTopics;
