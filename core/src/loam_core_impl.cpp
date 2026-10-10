@@ -543,8 +543,10 @@ void LoamCoreImpl::startKeycardSign(std::shared_ptr<KcPending> p) {
                         {"caller", "loam"}, {"scheme", "ecdsa"}};
     modules().keycard.requestSignAsync(args.dump(), [this, p](std::string res) {
         nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-        if (!r.is_object() || !r.contains("signId")) {
-            keycardSignResult(p->ref, nlohmann::json{{"error", "keycard requestSign failed"}, {"detail", res}}.dump());
+        // keycard is an optional dependency: when it isn't installed or can't load (no
+        // libpcsclite on this desktop), the call comes back empty and signing fails here.
+        if (!r.is_object() || !r.contains("signId") || !r["signId"].is_string()) {
+            keycardSignResult(p->ref, nlohmann::json{{"error", "Keycard isn't available on this computer"}, {"detail", res}}.dump());
             return;
         }
         p->signId = r["signId"].get<std::string>();
@@ -555,11 +557,13 @@ void LoamCoreImpl::startKeycardSign(std::shared_ptr<KcPending> p) {
 void LoamCoreImpl::pollKeycard(std::shared_ptr<KcPending> p) {
     modules().keycard.checkSignStatusAsync(p->signId, [this, p](std::string res) {
         nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-        const std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
-        if (status == "complete" && r.contains("signature")) { finalizeKeycard(p, r["signature"].get<std::string>()); return; }
+        auto str = [&](const char* k) { return (r.is_object() && r.contains(k) && r[k].is_string()) ? r[k].get<std::string>() : std::string(); };
+        const std::string status = str("status");
+        if (status == "complete" && !str("signature").empty()) { finalizeKeycard(p, str("signature")); return; }
         if (status == "failed" || (r.is_object() && r.contains("error"))) {
             // {error:"Sign request not found"} (expired) or an on-card failure — stop.
-            keycardSignResult(p->ref, nlohmann::json{{"error", r.value("error", status.empty() ? std::string("keycard sign failed") : status)}}.dump());
+            const std::string err = str("error");
+            keycardSignResult(p->ref, nlohmann::json{{"error", !err.empty() ? err : status.empty() ? std::string("keycard sign failed") : status}}.dump());
             return;
         }
         // still pending (incl. wrong-PIN retries, which stay pending) — poll again, with a cap.
@@ -602,9 +606,10 @@ void LoamCoreImpl::signDigestRaw(const std::string& domain, const std::string& d
     *poll = [this, st, poll]() {
         modules().keycard.checkSignStatusAsync(st->signId, [st, poll](std::string res) {
             nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-            const std::string status = r.is_object() ? r.value("status", std::string()) : std::string();
-            if (status == "complete" && r.contains("signature")) { st->done(r["signature"].get<std::string>(), ""); return; }
-            if (status == "failed" || (r.is_object() && r.contains("error"))) { st->done("", r.is_object() ? r.value("error", status) : status); return; }
+            auto str = [&](const char* k) { return (r.is_object() && r.contains(k) && r[k].is_string()) ? r[k].get<std::string>() : std::string(); };
+            const std::string status = str("status");
+            if (status == "complete" && !str("signature").empty()) { st->done(str("signature"), ""); return; }
+            if (status == "failed" || (r.is_object() && r.contains("error"))) { const std::string err = str("error"); st->done("", err.empty() ? status : err); return; }
             if (++st->polls > 180) { st->done("", "keycard sign timeout"); return; }
             QTimer::singleShot(1000, [poll] { (*poll)(); });
         });
@@ -612,7 +617,7 @@ void LoamCoreImpl::signDigestRaw(const std::string& domain, const std::string& d
     nlohmann::json args{{"domain", domain}, {"payloadHash", digestHex}, {"caller", "loam"}, {"scheme", "ecdsa"}};
     modules().keycard.requestSignAsync(args.dump(), [st, poll](std::string res) {
         nlohmann::json r = nlohmann::json::parse(res, nullptr, false);
-        if (!r.is_object() || !r.contains("signId")) { st->done("", "keycard requestSign failed: " + res); return; }
+        if (!r.is_object() || !r.contains("signId") || !r["signId"].is_string()) { st->done("", "Keycard isn't available on this computer: " + res); return; }
         st->signId = r["signId"].get<std::string>();
         (*poll)();
     });
