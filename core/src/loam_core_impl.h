@@ -135,6 +135,7 @@ private:
 
     loam::MultiBearer m_bearers;
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers
+    loam::IBearer* m_mesh = nullptr;       // the shrooms_mesh bearer (useMesh), owned by m_bearers
     // RAW delivery event subscription. The generated delivery_module.onChannelMessageReceived /
     // onMessageReceived wrappers pre-decode the payload with logos::jsonToBytes, which returns
     // EMPTY for anything that is not a {"_bytes":"…"} object — but the delivery emits the payload

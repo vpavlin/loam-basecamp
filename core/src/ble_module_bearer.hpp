@@ -20,9 +20,11 @@ public:
     std::function<void(const std::string& topic, const std::string& payloadB64)> flood;   // ble_mesh.flood
     std::function<void(FrameRecvCb)> onFrame;                                     // subscribe frameReceived
   };
-  explicit BleModuleBearer(Ops ops) : m_ops(std::move(ops)) { m_priority = 1; }   // fanned after delivery by default
+  // name: "ble" for the ble_mesh module, "mesh" for shrooms_mesh — same module shape (start, flood,
+  // frameReceived), so one adapter fronts both.
+  explicit BleModuleBearer(Ops ops, std::string name = "ble") : m_ops(std::move(ops)), m_name(std::move(name)) { m_priority = 1; }   // fanned after delivery by default
 
-  const std::string& name() const override { static const std::string n = "ble"; return n; }
+  const std::string& name() const override { return m_name; }
   bool ready() const override { return m_started; }
   void setPeers(long p) override { m_peers = p; }
 
@@ -44,7 +46,7 @@ public:
     if (m_ops.flood) { m_ops.flood(topic, b64::encode(sealedBytes)); ++m_tx; }
   }
   std::string metricsJson() const override {
-    std::string o = "{\"name\":\"ble\",\"enabled\":";
+    std::string o = "{\"name\":\"" + m_name + "\",\"enabled\":";
     o += m_enabled ? "true" : "false";
     o += ",\"priority\":" + std::to_string(m_priority);
     o += ",\"ready\":" + std::string(m_started ? "true" : "false");
@@ -56,6 +58,7 @@ public:
 
 private:
   Ops m_ops;
+  std::string m_name;
   bool m_started = false;
   long m_peers = 0;
 };

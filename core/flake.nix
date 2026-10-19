@@ -9,6 +9,8 @@
     ble_mesh.url = "github:vpavlin/loam-basecamp/0521263563e4e48270d0449864396cd4900969cc?dir=ble_mesh";
     # keycard: universal-interface port of Alisher's module (vpavlin/keycard-basecamp port/0.3).
     keycard.url = "github:vpavlin/keycard-basecamp/5e89fdf6ad226d3b0710d057b840f19f6d0b80e7";
+    # shrooms_mesh: sibling module (a Loam bearer over the Shrooms mesh), optional like keycard.
+    shrooms_mesh.url = "github:vpavlin/loam-basecamp/714bf06e92c2d72e3084f63a7210caf3afb6bf6a?dir=shrooms_mesh";
   };
 
   # mkLogosModule (not mkLogosQmlModule): a headless CORE module — no QML view. The
