@@ -45,6 +45,9 @@ public:
         // id for every topic links all of a desktop's apps and rooms. When set, used instead of deviceId.
         std::function<std::string(const std::string &topic)> senderFor;
         bool useChannels = true;             // SDS Reliable Channels (interops with mobile)
+        // Per-topic override of useChannels: true = this topic goes over plain relay (no SDS). An app
+        // whose own sync already repairs gaps (Scala's RBSR) skips SDS's ~19 KB per-message bloom filter.
+        std::function<bool(const std::string &topic)> relayOnly;
         bool hubMode = false;                // headless: delay createNode so handler IPC lands first
         // The FULL delivery createNode config (WakuNodeConf) as JSON, forwarded verbatim to
         // delivery.createNode — so the consuming app's shard/cluster/entryNodes/preset/mode all
@@ -216,7 +219,7 @@ public:
         auto attempt = [&](int repr) -> bool {
             try {
                 LogosMap p = (repr == 1) ? bytesPayload(enc) : LogosMap(enc);
-                if (m_cfg.useChannels) { if (m_ops.channelSend) m_ops.channelSend(topic, p, noop()); }
+                if (channels(topic)) { if (m_ops.channelSend) m_ops.channelSend(topic, p, noop()); }
                 else                   { if (m_ops.sendRaw)     m_ops.sendRaw(topic, p, noop()); }
                 return true;
             } catch (...) { return false; }
@@ -271,8 +274,11 @@ private:
         for (unsigned char c : s) a.push_back((unsigned)c);
         return a;
     }
+    bool channels(const std::string &topic) const {
+        return m_cfg.useChannels && !(m_cfg.relayOnly && m_cfg.relayOnly(topic));
+    }
     void doJoin(const std::string &topic) {
-        if (m_cfg.useChannels) {
+        if (channels(topic)) {
             if (m_ops.subscribe)     m_ops.subscribe(topic, noop());                       // recv service gate
             if (m_ops.channelCreate) m_ops.channelCreate(topic, topic, m_cfg.senderFor ? m_cfg.senderFor(topic) : m_cfg.deviceId, noop());
         } else {
