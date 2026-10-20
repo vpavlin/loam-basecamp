@@ -1,0 +1,24 @@
+{
+  "name": "shrooms_mesh",
+  "display_name": "Shrooms Mesh",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "universal",
+  "category": "system",
+  "description": "Loam bearer over the Shrooms mesh: sealed frames between your own devices on the WireGuard-authenticated mesh (TCP 7392 on mesh addresses only), peers found from the Shrooms daemon. No Logos Delivery node needed.",
+  "main": "shrooms_mesh_plugin",
+  "dependencies": [],
+  "nix": {
+    "packages": {
+      "build": ["openssl"],
+      "runtime": ["openssl"]
+    },
+    "external_libraries": [],
+    "cmake": {
+      "find_packages": [],
+      "extra_sources": [],
+      "extra_include_dirs": [],
+      "extra_link_libraries": []
+    }
+  }
+}
