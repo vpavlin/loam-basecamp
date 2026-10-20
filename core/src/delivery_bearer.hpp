@@ -6,6 +6,7 @@
 // (nlohmann::json, a complete SDK header); the generated delivery_module type arrives via
 // the `Ops` std::functions built in the .cpp. See ADR 0015 + basecamp/README.md.
 #pragma once
+#include <chrono>
 #include <set>
 #include "segment_compat.hpp"
 #include "multibearer.hpp"
@@ -167,7 +168,7 @@ public:
     }
 
     void becomeReady() {
-                    m_nodeReady = true; m_starting = false;
+                    m_nodeReady = true; m_starting = false; m_everReady = true;
                     // RE-SUBSCRIBE receive handlers now that the delivery host is LISTENING.
                     // The generated event-subscription (cpp-sdk pre-#134 9d508292e) does a blocking
                     // ensureReplica() at the FIRST subscribe — which runs before the delivery host
@@ -191,8 +192,12 @@ public:
     // topic: stop → start (re-dials entryNodes) → doJoin all. Receive handlers were registered on the
     // module (not the node), so they survive; SDS channels are rebuilt by the re-channelCreate in doJoin.
     void reconnect() override {
-        if (!m_nodeReady || m_reconnecting) return;
-        m_reconnecting = true;
+        // Once the node has ever been up, a restart may be asked for even while it is down — after a
+        // stall the bearer can be left not-ready (a stop/start that timed out). A restart in flight
+        // blocks a new one for 60 s, so one that never reports back doesn't block recovery for good.
+        const long long now = steadyMs();
+        if (!m_everReady || (m_reconnecting && now - m_reconnectAtMs < 60000)) return;
+        m_reconnecting = true; m_reconnectAtMs = now;
         fprintf(stderr, "loam delivery: node peerless — reconnecting (stop→start→rejoin %zu topics)\n", m_allTopics.size());
         fflush(stderr);
         auto doStart = [this]() {
@@ -200,9 +205,15 @@ public:
             m_awaitStart = (bool)m_ops.onNodeStarted;
             m_ops.start([this](bool ok, const std::string &err) {
                 if (ok && m_ops.onNodeStarted) return;          // finished in onStarted()
+                if (!ok) {
+                    // The call may only have timed out (the node was hung) and still run: keep
+                    // waiting for its nodeStarted, so a late success still completes the restart.
+                    fprintf(stderr, "loam reconnect start err: %s\n", err.c_str());
+                    if (!m_ops.onNodeStarted) { m_awaitStart = false; m_reconnecting = false; }
+                    return;
+                }
                 m_awaitStart = false;
                 m_reconnecting = false;
-                if (!ok) { fprintf(stderr, "loam reconnect start err: %s\n", err.c_str()); return; }
                 m_nodeReady = true;
                 for (const auto &t : m_allTopics) doJoin(t);
                 if (onReady) onReady();
@@ -287,7 +298,11 @@ private:
     }
 
     Ops m_ops; Config m_cfg; Delay m_delay;
-    bool m_nodeReady = false, m_starting = false, m_reconnecting = false;
+    bool m_nodeReady = false, m_starting = false, m_reconnecting = false, m_everReady = false;
+    long long m_reconnectAtMs = 0;
+    static long long steadyMs() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
     uint64_t m_rxSegmented = 0;
     bool m_awaitStart = false;        // start() dispatched, waiting for nodeStarted (delivery >= 0.3.0)
     bool m_startSubscribed = false;   // nodeStarted handler registered once   // frames that were part of a multi-segment set (dropped: no reassembly yet)

@@ -269,7 +269,8 @@ std::string LoamCoreImpl::start(std::string cfgJson) {
     // saw the "Connected" it waits for (scala started after kith/qaku synced nothing until a restart).
     // Re-announce the current state instead, so the late caller gets its signal.
     if (m_started) {
-        if ((m_delivery && m_delivery->ready()) || (!m_delivery && m_mesh && m_mesh->ready())) setStatus("Connected");
+        if (m_stalled) statusChanged(m_status);
+        else if ((m_delivery && m_delivery->ready()) || (!m_delivery && m_mesh && m_mesh->ready())) setStatus("Connected");
         else statusChanged(m_status);
         return "";
     }
@@ -369,6 +370,37 @@ std::string LoamCoreImpl::recentReceived() {
     return arr.dump();
 }
 
+// Transport stall: the delivery node stopped answering (its FFI wedged with "request queue full", or the
+// host hung) while everything above it still said "Connected" — a hub ran 11 days like that. After 30 s
+// without a successful metrics answer, say so on statusChanged; back to "Connected" on the next answer.
+// No restart from here: a wedged FFI doesn't take the stop/start calls either, and after a mere hang the
+// queued stop→start left delivery 0.3.0 peerless for good (tested). Restarting is for a watchdog outside.
+void LoamCoreImpl::noteMetricsFailure(const std::string& err, long long now) {
+    ++m_metricsFailStreak;
+    m_lastMetricsErr = err;
+    checkStall(now);
+}
+void LoamCoreImpl::checkStall(long long now) {
+    if (now - m_lastMetricsOkMs < 30000) return;
+    if (!m_stalled) {
+        m_stalled = true;
+        fprintf(stderr, "loam: transport stalled — no answer from delivery for %llds (%d failed): %s\n",
+                (now - m_lastMetricsOkMs) / 1000, m_metricsFailStreak,
+                m_lastMetricsErr.empty() ? "no answer" : m_lastMetricsErr.c_str());
+        fflush(stderr);
+        setStatus("Transport stalled: " + (m_lastMetricsErr.empty() ? std::string("delivery isn't answering") : m_lastMetricsErr));
+    }
+}
+void LoamCoreImpl::noteMetricsOk(long long now) {
+    m_lastMetricsOkMs = now;
+    m_metricsFailStreak = 0;
+    if (m_stalled) {
+        m_stalled = false;
+        fprintf(stderr, "loam: transport answering again\n"); fflush(stderr);
+        setStatus("Connected");
+    }
+}
+
 std::string LoamCoreImpl::status() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     return m_status;
@@ -381,10 +413,28 @@ void LoamCoreImpl::refreshMetrics() {
             char* end = nullptr; const long v = std::strtol(n.c_str(), &end, 10);
             if (m_mesh && end && end != n.c_str()) m_mesh->setPeers(v);
         });
-    if (!m_built || !m_delivery || !m_delivery->ready()) return;
-    modules().delivery_module.getNodeInfoAsync("Metrics", [this](StdLogosResult r) {
+    if (!m_built || !m_delivery) return;
+    const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (!m_delivery->ready()) return;
+    if (m_lastMetricsOkMs == 0) m_lastMetricsOkMs = now;
+    // One metrics call at a time: a wedged delivery node ("request queue full") would otherwise get a
+    // new call every 3 s on top of the unanswered ones. A call unanswered for 20 s counts as a failure.
+    if (m_metricsInFlight) {
+        if (now - m_metricsSentMs < 20000) { checkStall(now); return; }
+        m_metricsInFlight = false;
+        noteMetricsFailure("delivery didn't answer for 20 s", now);
+    }
+    m_metricsInFlight = true; m_metricsSentMs = now;
+    const unsigned gen = ++m_metricsGen;
+    modules().delivery_module.getNodeInfoAsync("Metrics", [this, gen](StdLogosResult r) {
         std::lock_guard<std::recursive_mutex> lk(m_mtx);
-        if (!r.success) return;
+        if (gen != m_metricsGen) return;           // a late answer to a call already counted as failed
+        m_metricsInFlight = false;
+        const long long t = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!r.success) { noteMetricsFailure(r.error.empty() ? std::string("getNodeInfo failed") : r.error, t); return; }
+        noteMetricsOk(t);
         const std::string metrics = r.value.is_string() ? r.value.get<std::string>() : r.value.dump();
         long peers = -1;
         std::istringstream ms(metrics); std::string ln;

@@ -156,6 +156,15 @@ private:
     // Peerless watchdog: peer-exchange can't recover from 0 peers (no one to ask), so if the node was
     // connected and stays at 0 peers for a sustained window, re-dial the entryNodes (bearer reconnect).
     int m_zeroPeerStreak = 0; bool m_everConnected = false; long long m_lastReconnectMs = 0;
+    // Transport-stall detection (refreshMetrics): see noteMetricsFailure in the .cpp.
+    bool m_metricsInFlight = false, m_stalled = false;
+    unsigned m_metricsGen = 0;
+    long long m_metricsSentMs = 0, m_lastMetricsOkMs = 0;
+    int m_metricsFailStreak = 0;
+    std::string m_lastMetricsErr;
+    void noteMetricsFailure(const std::string& err, long long now);
+    void noteMetricsOk(long long now);
+    void checkStall(long long now);
     std::string m_senderId = "loam-core";
     std::string senderSecret() const;
     std::string m_mode = "Core";     // delivery bearer node mode (Core|Edge)
