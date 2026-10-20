@@ -128,6 +128,11 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
 
         DB::Config cfg;
         cfg.deviceId = m_senderId;
+        cfg.relayOnly = [this](const std::string& topic) {
+            std::lock_guard<std::recursive_mutex> lk(m_mtx);
+            for (const auto& p : m_relayPrefixes) if (topic.compare(0, p.size(), p) == 0) return true;
+            return false;
+        };
         // Same derivation as the phone (loam-transport real-node.ts senderFor), keyed by a random
         // per-install secret, never by what apps pass to setSenderId (Scala/Kith pass their signing identity).
         {
@@ -289,6 +294,15 @@ std::string LoamCoreImpl::setSenderId(std::string id) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     if (!id.empty()) m_senderId = id;
     return "";   // call before start(); the senderId is baked into the reliable channel
+}
+
+std::string LoamCoreImpl::setTopicMode(std::string prefix, std::string mode) {
+    std::lock_guard<std::recursive_mutex> lk(m_mtx);
+    if (prefix.empty()) return "empty prefix";
+    if (mode == "relay") m_relayPrefixes.insert(prefix);
+    else if (mode == "channels") m_relayPrefixes.erase(prefix);
+    else return "mode must be relay or channels";
+    return "";
 }
 
 std::string LoamCoreImpl::join(std::string topic) {
