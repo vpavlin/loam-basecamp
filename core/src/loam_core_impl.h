@@ -109,6 +109,8 @@ public:
     // {topic, sender, payloadB64, ts}. Complements the `received` EVENT for headless collectors
     // (the hub can `call` this even where it can't stream the event) — e.g. loam-telemetry capture.
     std::string recentReceived();
+    // {"version","networkTs":true,"receivedMeta":true}: feature flags apps gate on.
+    std::string capabilities();
 
 protected:
     void onContextReady() override;
@@ -116,8 +118,14 @@ protected:
 logos_events:
     // A received frame, once-decoded and re-base64'd for IPC safety. App cores subscribe
     // via modules().loam_core.onReceived(...) and open the bytes with their own key.
+    // ts = the NETWORK message timestamp in NANOseconds (the WakuMessage timestamp; RLN binds it and
+    // relays reject one > ~20 s off), 0 when the bearer has none (BLE). A frame can be delivered a
+    // second time when a duplicate brings an EARLIER ts: dedup by event, keep the earliest ts.
     void received(const std::string& topic, const std::string& senderId,
                   const std::string& payloadB64, int64_t ts);
+    // The same delivery plus its meta: {"ts","source":"live"|"history"|"","bearer","frameId","redelivery"}.
+    void receivedMeta(const std::string& topic, const std::string& senderId,
+                      const std::string& payloadB64, const std::string& metaJson);
     void metricsChanged(const std::string& metricsJson);
     void statusChanged(const std::string& status);
     // Result of an async enrollKeycard / keycardSign, matched by the caller-chosen `ref`.

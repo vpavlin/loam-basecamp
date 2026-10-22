@@ -29,14 +29,22 @@ void LoamCoreImpl::setStatus(const std::string& s) { m_status = s; statusChanged
 
 void LoamCoreImpl::onContextReady() {
     // Receive path: MultiBearer dedups, then we emit `received` (b64 for IPC safety).
+    // `ts` is the NETWORK message timestamp in ns (0 = none; see loam::FrameMeta). A frame is
+    // delivered again when a duplicate brings an earlier network ts (apps dedup, keep the earliest).
     m_bearers.onReceived = [this](const std::string& topic, const std::string& sender,
-                                  const std::string& sealed, int64_t ts) {
+                                  const std::string& sealed, const loam::FrameMeta& meta,
+                                  const std::string& frameId, bool redelivery) {
         const std::string b64 = loam::b64::encode(sealed);
-        received(topic, sender, b64, ts);          // the QRO event (for GUI/app cores)
+        received(topic, sender, b64, meta.ts);     // the QRO event (for GUI/app cores)
+        LogosMap m;
+        m["ts"] = meta.ts; m["source"] = meta.source; m["bearer"] = meta.bearer;
+        m["frameId"] = frameId; m["redelivery"] = redelivery;
+        receivedMeta(topic, sender, b64, m.dump());
         // ALSO tee into a drainable ring, so a headless collector can pull frames via
         // recentReceived() even where the event stream isn't observable (loam-telemetry).
         std::lock_guard<std::recursive_mutex> lk(m_mtx);
-        LogosMap e; e["topic"] = topic; e["sender"] = sender; e["payloadB64"] = b64; e["ts"] = ts;
+        LogosMap e; e["topic"] = topic; e["sender"] = sender; e["payloadB64"] = b64; e["ts"] = meta.ts;
+        e["source"] = meta.source; e["bearer"] = meta.bearer; e["frameId"] = frameId; e["redelivery"] = redelivery;
         m_rxLog.push_back(e.dump());
         while (m_rxLog.size() > 256) m_rxLog.pop_front();
     };
@@ -108,8 +116,12 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
                 const size_t topicArg  = isChannel ? 0 : 1;
                 const std::string arg0 = a.at(topicArg).is_string() ? a.at(topicArg).get<std::string>() : std::string();
                 const std::string snd  = (isChannel && a.at(1).is_string()) ? a.at(1).get<std::string>() : std::string();
-                const int64_t ts       = a.back().is_number() ? (int64_t)a.back().get<double>() : 0;
-                rcb(arg0, snd, a.at(2), ts);   // a.at(2): raw payload JSON — bearer's toWire handles all shapes
+                // Only messageReceived carries the WakuMessage (network) timestamp; channelMessageReceived's
+                // last arg is the time delivery handled it (delivery_module_plugin.cpp currentTimestampNs),
+                // so it counts as "no network time". Same frame usually also arrives as messageReceived.
+                const int64_t ts       = (!isChannel && a.back().is_number()) ? (int64_t)a.back().get<double>() : 0;
+                const std::string src  = (!isChannel && a.size() >= 5 && a.at(3).is_string()) ? a.at(3).get<std::string>() : std::string();
+                rcb(arg0, snd, a.at(2), ts, src);   // a.at(2): raw payload JSON — bearer's toWire handles all shapes
             });
             if (sub.valid()) m_rawSubs.push_back(std::move(sub));
         };
@@ -356,8 +368,18 @@ std::string LoamCoreImpl::setNodeMode(std::string mode) {
 
 std::string LoamCoreImpl::metricsJson() {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
-    if (!m_built) return "{\"bearers\":[],\"peers\":-1,\"connected\":false}";
-    return m_bearers.metricsJson();
+    if (!m_built) return "{\"bearers\":[],\"peers\":-1,\"connected\":false,\"networkTs\":true}";
+    std::string m = m_bearers.metricsJson();
+    m.insert(m.size() - 1, ",\"networkTs\":true");   // capability flag (see capabilities())
+    return m;
+}
+
+// What this loam_core can do, so apps can gate on features instead of parsing versions.
+//   networkTs:    received/receivedMeta `ts` is the NETWORK message timestamp in ns (0 = none), and a
+//                 frame is delivered again when a duplicate brings an earlier one.
+//   receivedMeta: the receivedMeta(topic, sender, payloadB64, metaJson) event exists.
+std::string LoamCoreImpl::capabilities() {
+    return "{\"version\":\"0.8.0\",\"networkTs\":true,\"receivedMeta\":true}";
 }
 
 // Drain the receive ring: returns [{topic,sender,payloadB64,ts}, …] and clears it. A headless

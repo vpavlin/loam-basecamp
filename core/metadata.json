@@ -1,6 +1,6 @@
 {
   "name": "loam_core",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "type": "core",
   "interface": "universal",
   "category": "system",

@@ -19,6 +19,7 @@
 #include <memory>
 #include <cstdio>
 #include <cstdint>
+#include <map>
 #include <set>
 #include <deque>
 #include <algorithm>
@@ -64,10 +65,25 @@ inline std::string frameId(const std::string &topic, const std::string &bytes) {
     return out;
 }
 
+// Where a frame's time comes from. `ts` is the NETWORK message timestamp in nanoseconds: the
+// WakuMessage timestamp the publisher set, which RLN binds into the proof and relays reject when it is
+// more than ~20 s off their clock (logos-delivery rln_evm.nim MaxClockGapSeconds). 0 = the bearer has
+// none (BLE mesh, or delivery's channel event, which stamps local receive time), so apps must not
+// treat it as verified. `source` is delivery's "live" | "history" (store), "" when unknown.
+struct FrameMeta {
+    int64_t ts = 0;
+    std::string source;
+    std::string bearer;
+};
 // A frame handed up from a bearer: the topic, the sender's id (if the bearer knows it),
-// the ONCE-decoded sealed bytes (app peels the last layer), and a bearer-local timestamp.
+// the ONCE-decoded sealed bytes (app peels the last layer), and its meta.
 using FrameCb = std::function<void(const std::string &topic, const std::string &senderId,
-                                   const std::string &sealedBytes, int64_t ts)>;
+                                   const std::string &sealedBytes, const FrameMeta &meta)>;
+// What MultiBearer hands the facade: the frame, its meta, its frameId, and whether this is a
+// REDELIVERY (the same frame seen again with an earlier network timestamp).
+using ReceivedCb = std::function<void(const std::string &topic, const std::string &senderId,
+                                      const std::string &sealedBytes, const FrameMeta &meta,
+                                      const std::string &frameId, bool redelivery)>;
 
 // ── Bearer interface (std::string only) ─────────────────────────────────────
 class IBearer {
@@ -100,14 +116,15 @@ protected:
 // ── MultiBearer: fan-out + dedup ────────────────────────────────────────────
 class MultiBearer {
 public:
-    // The facade sets this; MultiBearer calls it once per NEW frame (post-dedup).
-    FrameCb onReceived;
+    // The facade sets this; MultiBearer calls it once per NEW frame (post-dedup), and once more
+    // whenever a duplicate brings an EARLIER network timestamp than the one already delivered.
+    ReceivedCb onReceived;
     // Overall reachable-peer count; the facade fills it from the delivery metrics poll.
     long overallPeers = -1;
 
     void add(std::unique_ptr<IBearer> b) {
         b->onFrame = [this](const std::string &topic, const std::string &sender,
-                            const std::string &bytes, int64_t ts) { ingest(topic, sender, bytes, ts); };
+                            const std::string &bytes, const FrameMeta &meta) { ingest(topic, sender, bytes, meta); };
         m_bearers.push_back(std::move(b));
     }
     void startAll()                       { for (auto &b : ordered()) b->start(); }
@@ -149,19 +166,31 @@ public:
     }
 
 private:
+    // Dedup by frameId, keeping the EARLIEST network timestamp seen. The first copy is delivered at
+    // once; a later copy is delivered again only if it carries an earlier network ts than the one
+    // delivered (or the first had none) — e.g. a catch-up re-publish reached us before the store's
+    // copy of the original. Apps dedup events themselves and keep the earliest ts.
     void ingest(const std::string &topic, const std::string &sender,
-                const std::string &sealedBytes, int64_t ts) {
+                const std::string &sealedBytes, const FrameMeta &meta) {
         const std::string id = frameId(topic, sealedBytes);
-        if (!m_seen.insert(id).second) return;            // duplicate across bearers → drop
+        auto it = m_seen.find(id);
+        if (it != m_seen.end()) {
+            const int64_t had = it->second;
+            if (meta.ts <= 0 || (had > 0 && meta.ts >= had)) return;   // no earlier network time → drop
+            it->second = meta.ts;
+            if (onReceived) onReceived(topic, sender, sealedBytes, meta, id, true);
+            return;
+        }
         if (m_seenOrder.size() >= kSeenMax) {              // bounded seen-set
             m_seen.erase(m_seenOrder.front()); m_seenOrder.pop_front();
         }
+        m_seen.emplace(id, meta.ts);
         m_seenOrder.push_back(id);
-        if (onReceived) onReceived(topic, sender, sealedBytes, ts);
+        if (onReceived) onReceived(topic, sender, sealedBytes, meta, id, false);
     }
     static constexpr size_t kSeenMax = 8192;
     std::vector<std::unique_ptr<IBearer>> m_bearers;
-    std::set<std::string> m_seen;
+    std::map<std::string, int64_t> m_seen;   // frameId → earliest network ts delivered (0 = none)
     std::deque<std::string> m_seenOrder;
 };
 
