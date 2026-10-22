@@ -20,9 +20,11 @@ template <class LogosMap>
 class DeliveryBearer : public IBearer {
 public:
     using Cb = std::function<void(bool ok, const std::string &err)>;
-    // topic/channelId, senderId (empty for raw relay), the raw payload, a timestamp.
+    // topic/channelId, senderId (empty for raw relay), the raw payload, the NETWORK message timestamp
+    // in ns (0 when the event has none: channel events carry local receive time), and delivery's
+    // source ("live" | "history", "" when the event doesn't say).
     using RecvCb = std::function<void(const std::string &topic, const std::string &senderId,
-                                      const LogosMap &payload, int64_t ts)>;
+                                      const LogosMap &payload, int64_t netTs, const std::string &source)>;
     // Thin wrappers around modules().delivery_module.*, built in loam_core_impl.cpp where
     // the generated type is complete. Adapt StdLogosResult → Cb(ok,err) there.
     struct Ops {
@@ -82,7 +84,7 @@ public:
             return std::string();
         };
         auto handle = [this, toWire](const std::string &topic, const std::string &sender,
-                                     const LogosMap &payload, int64_t ts) {
+                                     const LogosMap &payload, int64_t netTs, const std::string &source) {
             std::string enc = toWire(payload);
             if (enc.empty() && payload.is_object() && payload.contains("payload")) enc = toWire(payload["payload"]);
             if (enc.empty()) return;
@@ -119,7 +121,8 @@ public:
             // frames both delivers garbage AND floods `received` (a QRO event storm that wedges the hub).
             if (sealed.empty()) return;
             ++m_rx;
-            if (onFrame) onFrame(tpc, snd, sealed, ts);
+            FrameMeta meta; meta.ts = netTs; meta.source = source; meta.bearer = "delivery";
+            if (onFrame) onFrame(tpc, snd, sealed, meta);
         };
         m_handle = handle;   // stored so we can RE-subscribe once the delivery host is listening (below)
         // Register receive handlers BEFORE createNode (the position a GUI host receives with).

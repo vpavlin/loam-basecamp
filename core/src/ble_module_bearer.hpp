@@ -35,7 +35,10 @@ public:
       // ble_mesh hands us base64-of-raw-sealed; decode to raw and funnel up so the MultiBearer
       // dedups it against the Waku copy by the SAME frameId(topic, rawSealed).
       ++m_rx;
-      if (onFrame) onFrame(topic, sender, b64::decode(payloadB64), ts);
+      // BLE has no network timestamp (ts is the mesh's own clock): 0 = unverified (FrameMeta).
+      (void)ts;
+      FrameMeta meta; meta.bearer = "ble_mesh";
+      if (onFrame) onFrame(topic, sender, b64::decode(payloadB64), meta);
     });
     if (m_ops.start) m_ops.start();
     m_started = true;   // stub radio starts instantly; a real radio reports peers via setPeers()
