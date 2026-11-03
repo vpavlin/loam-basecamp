@@ -45,9 +45,9 @@ public:
     std::string stop();
     std::string setSenderId(std::string id);
     std::string join(std::string topic);
-    // Topics starting with `prefix` go over plain relay instead of SDS reliable channels ("relay"),
-    // or back to channels ("channels"). Per topic, so apps sharing this node keep their own choice.
-    // Call before join(); a topic already joined keeps its mode until the node restarts.
+    // Every topic goes over plain relay unless its prefix was set to "channels" (SDS reliable channels,
+    // opt-in since 0.7.3); "relay" undoes that. Per topic, so apps sharing this node keep their own
+    // choice. Call before join(); a topic already joined keeps its mode until the node restarts.
     std::string setTopicMode(std::string prefix, std::string mode);
     std::string sendSealed(std::string topic, std::string sealedB64);
 
@@ -140,8 +140,8 @@ private:
 
     loam::MultiBearer m_bearers;
     loam::IBearer* m_delivery = nullptr;   // the delivery bearer, owned by m_bearers
-    loam::IBearer* m_mesh = nullptr;
-    std::set<std::string> m_relayPrefixes;   // setTopicMode(prefix, "relay")       // the shrooms_mesh bearer (useMesh), owned by m_bearers
+    loam::IBearer* m_mesh = nullptr;              // the shrooms_mesh bearer (useMesh), owned by m_bearers
+    std::set<std::string> m_channelPrefixes;      // setTopicMode(prefix, "channels"): SDS is opt-in; every other topic is plain relay
     // RAW delivery event subscription. The generated delivery_module.onChannelMessageReceived /
     // onMessageReceived wrappers pre-decode the payload with logos::jsonToBytes, which returns
     // EMPTY for anything that is not a {"_bytes":"…"} object — but the delivery emits the payload
