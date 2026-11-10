@@ -149,6 +149,15 @@ static void lifecycle() {
         t.notePeers(0, 33000);
         check(d.count("stop") == 1 && d.count("start") == 2 && t.ready() && ready == 2 && d.subscribed.size() == 2, "peerless 30 s: stop, start, join again, ready again");
     }
+    {   // loam_core's settings (as <= 0.7.3): every frame passes, channel handler always registered.
+        Fake d; DeliveryTransport<J>::Config cfg; cfg.onlyJoinedTopics = false; cfg.alwaysListenChannels = true;
+        auto ops = d.ops(); int chan = 0; ops.onChannelMessage = [&](auto) { ++chan; };
+        DeliveryTransport<J> t(ops, cfg);
+        std::vector<Frame> got; t.onFrame = [&](const Frame &f) { got.push_back(f); };
+        t.start();
+        d.handlers.back()("/other/1/x/proto", "", bytesArray(b64::encode("any")), 1);
+        check(got.size() == 1 && chan == 2, "loam_core mode: frames on any topic pass, channel handler registered (before and after ready)");
+    }
     {   // Another module created the node and runs it: adopt it.
         Fake d; d.createErr = "Context already initialized"; DeliveryTransport<J>::Config cfg;
         DeliveryTransport<J> t(d.ops(), cfg);

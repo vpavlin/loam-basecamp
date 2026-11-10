@@ -176,6 +176,10 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
         cfg.nodeConfigJson = loam::delivery::nodeConfig<LogosMap>(j, rln, m_mode).dump();
         // loam_core polls metrics itself (refreshMetrics, with stall detection) and reports peers.
         cfg.pollMetrics = false;
+        // Exactly as loam_core <= 0.7.3: every decoded frame goes to `received` (apps filter), and the
+        // channel receive handler is always registered.
+        cfg.onlyJoinedTopics = false;
+        cfg.alwaysListenChannels = true;
 
         auto db = std::make_unique<DB>(ops, cfg);
         // Turn the bearer's readiness into a statusChanged("Connected") event: start() returns

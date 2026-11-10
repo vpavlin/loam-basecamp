@@ -270,6 +270,11 @@ public:
         // Adopting a node another module created: if it isn't running (getConnectionStatus) after
         // this long, start it.
         int adoptStartAfterSeconds = 30;
+        // Hand on only frames for topics joined through this transport (other apps share the node).
+        // loam_core passes everything on, as it always did; apps filter.
+        bool onlyJoinedTopics = true;
+        // Register Ops::onChannelMessage even when useChannels is off (loam_core always did).
+        bool alwaysListenChannels = false;
         // tick() polls Ops::metrics for the peer count. Off when the core polls metrics itself and
         // reports peers with notePeers() (loam_core); the adopt probe still uses Ops::metrics.
         bool pollMetrics = true;
@@ -429,7 +434,7 @@ private:
     }
     void subscribeReceive() {
         if (m_ops.onMessage) m_ops.onMessage(m_handle);
-        if (m_ops.onChannelMessage && m_cfg.useChannels) m_ops.onChannelMessage(m_handle);
+        if (m_ops.onChannelMessage && (m_cfg.useChannels || m_cfg.alwaysListenChannels)) m_ops.onChannelMessage(m_handle);
     }
     // Another module created the node first (one node per Basecamp). Use it: its config is theirs.
     void adopt() {
@@ -500,7 +505,7 @@ private:
         Frame f;
         switch (decodeReceived(topicArg, senderArg, payload, ts, f)) {
         case Decoded::Frame:
-            if (!m_topics.count(f.topic)) return;   // another app's topic on the shared node
+            if (m_cfg.onlyJoinedTopics && !m_topics.count(f.topic)) return;   // another app's topic on the shared node
             ++m_rx;
             if (onFrame) onFrame(f);
             return;
