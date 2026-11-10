@@ -123,18 +123,29 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
             });
             if (sub.valid()) m_rawSubs.push_back(std::move(sub));
         };
+        ops.metrics = [this](std::function<void(bool, const std::string&)> cb) {
+            modules().delivery_module.getNodeInfoAsync("Metrics", [cb](StdLogosResult r) {
+                cb(r.success, r.value.is_string() ? r.value.get<std::string>() : r.value.dump());
+            });
+        };
+        ops.connectionStatus = [this](std::function<void(bool, const std::string&)> cb) {
+            modules().delivery_module.getConnectionStatusAsync([cb](StdLogosResult r) {
+                cb(r.success, r.value.is_string() ? r.value.get<std::string>() : r.value.dump());
+            });
+        };
         ops.onMessage        = [this, rawEvent](DB::RecvCb rcb) { rawEvent("messageReceived", false, rcb); };
         ops.onChannelMessage = [this, rawEvent](DB::RecvCb rcb) { rawEvent("channelMessageReceived", true, rcb); };
 
         DB::Config cfg;
-        cfg.deviceId = m_senderId;
+        cfg.useChannels = true;
+        cfg.senderId = m_senderId;
         // Plain relay for every topic unless an app asked for SDS channels (2026-11-03). SDS added a ~19 KB
         // bloom filter to every message, and every app on Loam repairs gaps with its own catch-up
         // (loam-sync RBSR) or needs none (Backpack: the newest signed note wins).
-        cfg.relayOnly = [this](const std::string& topic) {
+        cfg.channelFor = [this](const std::string& topic) {
             std::lock_guard<std::recursive_mutex> lk(m_mtx);
-            for (const auto& p : m_channelPrefixes) if (topic.compare(0, p.size(), p) == 0) return false;
-            return true;
+            for (const auto& p : m_channelPrefixes) if (topic.compare(0, p.size(), p) == 0) return true;
+            return false;
         };
         // Same derivation as the phone (loam-transport real-node.ts senderFor), keyed by a random
         // per-install secret, never by what apps pass to setSenderId (Scala/Kith pass their signing identity).
@@ -148,70 +159,23 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
                 return out;
             };
         }
-        // Parse the app's cfg. loam-only keys (useChannels, hubMode) are pulled OUT into Config;
-        // everything else is the delivery node config (WakuNodeConf) forwarded verbatim to
-        // createNode — so the app's shard/cluster/entryNodes/preset/mode all pass through.
+        // Parse the app's cfg. loam-only keys are pulled OUT; everything else is the delivery node
+        // config, completed by loam::delivery::nodeConfig (include/loam/delivery_transport.hpp, shared
+        // with apps that talk to delivery_module directly): layered shape flattened, mode, random ports,
+        // and logos.test WITHOUT RLN unless rln:true (delivery_module >= 0.3.0 attaches RLN to the
+        // preset NAME "logos.test"; without a funded membership every send fails).
         LogosMap j = cfgJson.empty() ? LogosMap::object() : LogosMap::parse(cfgJson, nullptr, false);
         if (!j.is_object()) j = LogosMap::object();
-        if (j.contains("hubMode")     && j["hubMode"].is_boolean())     cfg.hubMode     = j["hubMode"].get<bool>();
-        // useChannels: true → SDS Reliable Channels (mobile parity, default); false → raw relay
-        // (shipping kym's current wire). Keeps loam_core a drop-in — no silent mode flip.
+        // useChannels: SDS Reliable Channels allowed for topics an app asked for (see channelFor).
         if (j.contains("useChannels") && j["useChannels"].is_boolean()) cfg.useChannels = j["useChannels"].get<bool>();
-        // BLE mesh is OFF by default. It is an OPTIONAL second bearer, and wiring it into the
-        // fan-out + dedup receive path made the primary Waku delivery unreliable (intermittent
-        // drops). Waku is the reliable transport; only add the BLE bearer when a caller explicitly
-        // opts in with useBle:true. Default off == the single-Waku-bearer path from before BLE mesh.
-        // rln: false (default) joins the logos.test network WITHOUT RLN. Upstream delivery_module
-        // (>= 0.3.0) attaches RLN to the "logos.test" preset by name, and without a funded membership
-        // every send fails. The library's own logos.test preset has RLN off, so with rln:false we pass
-        // its network parameters explicitly instead of the preset name (same cluster, shards, entry
-        // nodes). rln:true uses the preset — and then needs the RLN modules + a membership.
+        // BLE mesh is OFF by default (useBle:true opts in): wiring it into the fan-out + dedup receive
+        // path made the primary Waku delivery unreliable. See useBle below.
         const bool rln = j.contains("rln") && j["rln"].is_boolean() && j["rln"].get<bool>();
-        j.erase("hubMode"); j.erase("useChannels"); j.erase("useBle"); j.erase("rln");
-        j.erase("useDelivery"); j.erase("useMesh");  // not delivery-node keys
-        // Apps written for delivery 0.2.x pass the LAYERED shape ({preset, messagingOverrides:{...}}).
-        // Upstream delivery switches to the legacy FLAT parser as soon as any other top-level key is
-        // present — and we add some below — where "messagingOverrides" is an unknown key (an error).
-        // So flatten it: dash-case messaging keys become the flat (camelCase) node options.
-        if (j.contains("messagingOverrides") && j["messagingOverrides"].is_object()) {
-            for (auto it = j["messagingOverrides"].begin(); it != j["messagingOverrides"].end(); ++it) {
-                std::string k, key = it.key();
-                for (size_t i = 0; i < key.size(); ++i) {
-                    if (key[i] == '-' && i + 1 < key.size()) { k.push_back((char)std::toupper((unsigned char)key[++i])); }
-                    else k.push_back(key[i]);
-                }
-                if (!j.contains(k)) j[k] = it.value();
-            }
-            j.erase("messagingOverrides");
-        }
-        if (!j.contains("mode"))   j["mode"]   = m_mode;               // default node mode
-        // Random ports unless the app pins them. The flat config defaults to a FIXED tcp 60000 and
-        // discv5 udp 9000 (QUIC follows the TCP port), so a second node on the machine — another app's,
-        // a hub — failed START_NODE with "Address already in use".
-        if (!j.contains("tcpPort"))       j["tcpPort"] = 0;
-        if (!j.contains("discv5UdpPort")) j["discv5UdpPort"] = 0;
-        const bool logosTest = !j.contains("preset") ||
-            (j["preset"].is_string() && j["preset"].get<std::string>() == "logos.test");
-        if (logosTest && rln) {
-            j["preset"] = "logos.test";                                // cluster-2 (ADR 0008) + RLN
-        } else if (logosTest) {
-            // Mirror of logos-delivery v0.39 networks_config.nim LogosTestConf (RLN off there).
-            j["preset"] = "";
-            if (!j.contains("clusterId"))          j["clusterId"] = 2;
-            if (!j.contains("numShardsInNetwork")) j["numShardsInNetwork"] = 8;
-            if (!j.contains("maxMessageSize"))     j["maxMessageSize"] = "150KiB";
-            if (!j.contains("discv5Discovery"))    j["discv5Discovery"] = true;
-            if (!j.contains("enableKadDiscovery")) j["enableKadDiscovery"] = true;
-            if (!j.contains("reliabilityEnabled")) j["reliabilityEnabled"] = true;
-            if (!j.contains("entryNodes")) j["entryNodes"] = LogosMap::array({
-                "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
-                "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
-                "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
-                "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7",
-                "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
-                "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV"});
-        }
-        cfg.nodeCfgJson = j.dump();
+        cfg.rln = rln;
+        for (const char* k : {"hubMode", "useChannels", "useBle", "rln", "useDelivery", "useMesh"}) j.erase(k);  // not node keys
+        cfg.nodeConfigJson = loam::delivery::nodeConfig<LogosMap>(j, rln, m_mode).dump();
+        // loam_core polls metrics itself (refreshMetrics, with stall detection) and reports peers.
+        cfg.pollMetrics = false;
 
         auto db = std::make_unique<DB>(ops, cfg);
         // Turn the bearer's readiness into a statusChanged("Connected") event: start() returns
@@ -219,6 +183,7 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
         // not from the start() callback.
         db->onReady = [this] { setStatus("Connected"); };
         db->onError = [this](const std::string& msg) { setStatus("Delivery error: " + msg); };
+        db->onWarning = [](const std::string&) {};   // logged to stderr by the transport
         m_delivery = db.get();
         m_bearers.add(std::move(db));
     }
@@ -419,6 +384,7 @@ void LoamCoreImpl::refreshMetrics() {
     if (!m_built || !m_delivery) return;
     const long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+    static_cast<DB*>(m_delivery)->tick(now);   // adopting a node another module created: probe it, start it if nobody does
     if (!m_delivery->ready()) return;
     if (m_lastMetricsOkMs == 0) m_lastMetricsOkMs = now;
     // One metrics call at a time: a wedged delivery node ("request queue full") would otherwise get a
@@ -448,21 +414,10 @@ void LoamCoreImpl::refreshMetrics() {
                 if (sp != std::string::npos) try { peers = (long)std::stod(ln.substr(sp + 1)); } catch (...) {}
             }
         }
-        if (peers >= 0) { m_delivery->setPeers(peers); m_bearers.overallPeers = peers; }
-        // Peerless watchdog. Peer-exchange keeps peers healthy while connected but cannot bootstrap from
-        // 0 (the PX loop asks an existing peer — none, when peerless). So if the node was connected and
-        // then sits at 0 peers for ~30s (10 polls @3s), re-dial the entryNodes via the bearer reconnect.
-        // Cooldown 45s so a genuinely-down fleet doesn't cause a restart storm.
-        if (peers > 0) { m_everConnected = true; m_zeroPeerStreak = 0; }
-        else if (peers == 0 && m_everConnected && ++m_zeroPeerStreak >= 10) {
-            long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (now - m_lastReconnectMs > 45000) {
-                m_lastReconnectMs = now; m_zeroPeerStreak = 0;
-                fprintf(stderr, "loam: node peerless ~30s → re-dialing entryNodes (PX can't recover from 0)\n"); fflush(stderr);
-                if (m_delivery) m_delivery->reconnect();
-            }
-        }
+        if (peers >= 0) m_bearers.overallPeers = peers;
+        // Peerless watchdog (in the transport): peer exchange can't bootstrap from 0, so a node that had
+        // peers and sits at 0 for ~30 s is stopped and started to re-dial the entry nodes (45 s cooldown).
+        if (m_delivery) static_cast<DB*>(m_delivery)->notePeers(peers, t);
         metricsChanged(m_bearers.metricsJson());
     });
 }

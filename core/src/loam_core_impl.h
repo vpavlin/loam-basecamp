@@ -155,7 +155,7 @@ private:
     bool m_built = false, m_started = false, m_forceMesh = false;
     // Peerless watchdog: peer-exchange can't recover from 0 peers (no one to ask), so if the node was
     // connected and stays at 0 peers for a sustained window, re-dial the entryNodes (bearer reconnect).
-    int m_zeroPeerStreak = 0; bool m_everConnected = false; long long m_lastReconnectMs = 0;
+    // (peerless watchdog state lives in loam::delivery::DeliveryTransport)
     // Transport-stall detection (refreshMetrics): see noteMetricsFailure in the .cpp.
     bool m_metricsInFlight = false, m_stalled = false;
     unsigned m_metricsGen = 0;
