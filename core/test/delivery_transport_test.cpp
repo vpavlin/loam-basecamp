@@ -149,6 +149,22 @@ static void lifecycle() {
         t.notePeers(0, 33000);
         check(d.count("stop") == 1 && d.count("start") == 2 && t.ready() && ready == 2 && d.subscribed.size() == 2, "peerless 30 s: stop, start, join again, ready again");
     }
+    {   // Never had peers (started offline): re-dials too, after twice the time.
+        Fake d; DeliveryTransport<J>::Config cfg; DeliveryTransport<J> t(d.ops(), cfg);
+        t.start();
+        t.notePeers(0, 1000); t.notePeers(0, 40000);
+        check(d.count("stop") == 0, "never connected: not yet at 39 s");
+        t.notePeers(0, 62000);
+        check(d.count("stop") == 1 && t.ready(), "never connected: re-dials after 60 s");
+    }
+    {   // Adopted node: three times as long, so its owner's watchdog goes first.
+        Fake d; d.createErr = "Context already initialized"; DeliveryTransport<J>::Config cfg; DeliveryTransport<J> t(d.ops(), cfg);
+        t.start();
+        t.notePeers(3, 1000); t.notePeers(0, 2000); t.notePeers(0, 60000);
+        check(d.count("stop") == 0, "adopted: not at 58 s");
+        t.notePeers(0, 93000);
+        check(d.count("stop") == 1, "adopted: re-dials after 90 s");
+    }
     {   // loam_core's settings (as <= 0.7.3): every frame passes, channel handler always registered.
         Fake d; DeliveryTransport<J>::Config cfg; cfg.onlyJoinedTopics = false; cfg.alwaysListenChannels = true;
         auto ops = d.ops(); int chan = 0; ops.onChannelMessage = [&](auto) { ++chan; };

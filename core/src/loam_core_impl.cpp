@@ -6,7 +6,7 @@
 #include "loam_core_impl.h"
 #include "logos_sdk.h"          // umbrella: complete LogosModules + LogosMap (nlohmann::json)
 #include "delivery_bearer.hpp"  // DeliveryBearer<LogosMap> (needs LogosMap → after logos_sdk.h)
-#include "ble_module_bearer.hpp"// BleModuleBearer — fronts the ble_mesh module (Ops bound below)
+#include "ble_module_bearer.hpp"// BleModuleBearer — fronts a flood-mesh module (shrooms_mesh, bound below)
 #include "logos_result.h"      // StdLogosResult {success, value, error}
 #include <QTimer>
 #include <QDir>
@@ -55,14 +55,13 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
     //     at all (delivery_module may be installed and loaded, but nothing is created).
     //   useMesh (default false): shrooms_mesh — frames between your own devices over the Shrooms
     //     mesh. With useDelivery:false it is the only bearer.
-    //   useBle (default false): ble_mesh, see below.
-    bool useDelivery = true, useMesh = false, useBle = false;
+    //   (useBle is gone: the ble_mesh bearer was dropped in 0.7.5, it never worked on desktop.)
+    bool useDelivery = true, useMesh = false;
     {
         const LogosMap f = cfgJson.empty() ? LogosMap::object() : LogosMap::parse(cfgJson, nullptr, false);
         auto flag = [&f](const char* k, bool d) { return (f.is_object() && f.contains(k) && f[k].is_boolean()) ? f[k].get<bool>() : d; };
         useDelivery = flag("useDelivery", true);
         useMesh = flag("useMesh", false);
-        useBle = flag("useBle", false);
     }
     if (useDelivery) {
         DB::Ops ops;
@@ -168,8 +167,7 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
         if (!j.is_object()) j = LogosMap::object();
         // useChannels: SDS Reliable Channels allowed for topics an app asked for (see channelFor).
         if (j.contains("useChannels") && j["useChannels"].is_boolean()) cfg.useChannels = j["useChannels"].get<bool>();
-        // BLE mesh is OFF by default (useBle:true opts in): wiring it into the fan-out + dedup receive
-        // path made the primary Waku delivery unreliable. See useBle below.
+        // useBle is ignored since 0.7.5 (no ble_mesh bearer); it is still stripped so old configs stay valid.
         const bool rln = j.contains("rln") && j["rln"].is_boolean() && j["rln"].get<bool>();
         cfg.rln = rln;
         for (const char* k : {"hubMode", "useChannels", "useBle", "rln", "useDelivery", "useMesh"}) j.erase(k);  // not node keys
@@ -192,26 +190,7 @@ void LoamCoreImpl::ensureBearers(const std::string& cfgJson) {
         m_bearers.add(std::move(db));
     }
 
-    // Second bearer: the ble_mesh module (flood-gossip over Bluetooth). OFF unless useBle:true —
-    // see above. When enabled the MultiBearer fans each write to it too and dedups its frames
-    // against the Waku copy by frameId. Kept behind the flag so Waku-only delivery stays the
-    // reliable default and the BLE code is here for when the mesh work resumes.
-    if (useBle) {
-        loam::BleModuleBearer::Ops bops;
-        bops.start = [this] { modules().ble_mesh.startAsync([](std::string) {}); };
-        bops.flood = [this](const std::string& topic, const std::string& payloadB64) {
-          modules().ble_mesh.floodAsync(topic, payloadB64, [](std::string) {});
-        };
-        bops.onFrame = [this](loam::BleModuleBearer::FrameRecvCb cb) {
-          modules().ble_mesh.onFrameReceived(
-            [cb](const std::string& topic, const std::string& sender, const std::string& payloadB64, int64_t ts) {
-              cb(topic, sender, payloadB64, ts);
-            });
-        };
-        m_bearers.add(std::make_unique<loam::BleModuleBearer>(bops));
-    }
-
-    // shrooms_mesh: the same module shape as ble_mesh, over the Shrooms mesh (TCP 7392 between your
+    // shrooms_mesh: a mesh module (BleModuleBearer shape), over the Shrooms mesh (TCP 7392 between your
     // own devices). Ready as soon as it starts; with no delivery bearer it is what makes us Connected.
     if (useMesh) {
         loam::BleModuleBearer::Ops mops;
@@ -317,7 +296,7 @@ std::string LoamCoreImpl::setBearerPriority(std::string orderCsv) {
 std::string LoamCoreImpl::forceMesh(std::string on) {
     std::lock_guard<std::recursive_mutex> lk(m_mtx);
     m_forceMesh = (on == "1" || on == "true");
-    return "";   // no-op until the ble_mesh bearer exists (Phase 4); stored for then
+    return "";   // no-op (there is no Bluetooth bearer on desktop); stored for a future mesh bearer
 }
 
 std::string LoamCoreImpl::setNodeMode(std::string mode) {

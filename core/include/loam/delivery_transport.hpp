@@ -263,8 +263,9 @@ public:
         // cpp-sdk predates logos-cpp-sdk #134 (the first subscription, made before the delivery host
         // listens, fails silently and nothing is ever received). Harmless otherwise.
         bool resubscribeAfterReady = true;
-        // Peerless watchdog (tick): after this many seconds at 0 peers, having had peers, stop/start
-        // the node to re-dial the entry nodes (peer exchange can't recover from 0). 0 = off.
+        // Peerless watchdog (tick): after this many seconds at 0 peers, stop/start the node to re-dial
+        // the entry nodes (peer exchange can't recover from 0). Twice as long before the first connect,
+        // three times as long on an adopted node. 0 = off.
         int peerlessSeconds = 30;
         int reconnectCooldownSeconds = 45;
         // Adopting a node another module created: if it isn't running (getConnectionStatus) after
@@ -359,12 +360,20 @@ public:
         if (peers < 0) return;
         m_peers = peers;
         if (peers > 0) { m_everConnected = true; m_zeroSinceMs = 0; return; }
-        if (!m_everConnected || m_cfg.peerlessSeconds <= 0) return;
+        if (m_cfg.peerlessSeconds <= 0) return;
         if (m_zeroSinceMs == 0) { m_zeroSinceMs = nowMs; return; }
-        if (nowMs - m_zeroSinceMs >= (long long)m_cfg.peerlessSeconds * 1000 &&
+        // Also when it never had peers: a node started while offline (or while the entry nodes were
+        // down) never dials them again on delivery < v0.40, and an Edge node has no connectivity loop
+        // at all. The first connect gets twice the time. An ADOPTED node waits three times as long, so
+        // its owner (if it runs this watchdog too) restarts it first and the two don't take turns.
+        long long wait = (long long)m_cfg.peerlessSeconds * 1000;
+        if (!m_everConnected) wait *= 2;
+        if (m_adopted) wait *= 3;
+        if (nowMs - m_zeroSinceMs >= wait &&
             (m_lastReconnectMs == 0 || nowMs - m_lastReconnectMs > (long long)m_cfg.reconnectCooldownSeconds * 1000)) {
             m_lastReconnectMs = nowMs; m_zeroSinceMs = 0;
-            std::fprintf(stderr, "loam delivery: peerless %ds, re-dialing the entry nodes\n", m_cfg.peerlessSeconds);
+            std::fprintf(stderr, "loam delivery: peerless %llds%s, re-dialing the entry nodes\n", wait / 1000,
+                         m_adopted ? " (adopted node: restarting it for every module on it)" : "");
             reconnect();
         }
     }
